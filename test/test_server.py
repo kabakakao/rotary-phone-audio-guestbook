@@ -26,6 +26,7 @@ so config edits made through the UI do not persist across restarts.
 
 import logging
 import os
+import subprocess
 import sys
 from pathlib import Path
 from unittest import mock
@@ -67,10 +68,21 @@ os.environ["AGB_UPLOAD_FOLDER"] = str(TEST_UPLOADS_DIR)
 # Neuter device-only side effects (this is a dedicated, throwaway process):
 #   * edit_config() shells out to `sudo systemctl restart audioGuestBook.service`
 #   * reboot() / shutdown() call os.system("sudo reboot/shutdown ...")
-mock.patch(
-    "webserver.server.subprocess.run",
-    side_effect=lambda *a, **k: logger.info("suppressed subprocess.run: %s", a[0] if a else ""),
-).start()
+# Other subprocess.run calls (e.g. the arecord/aplay/amixer audio-test endpoints)
+# are passed through to the real subprocess.run so they can still be exercised
+# manually against real hardware/ALSA devices on the dev machine.
+_real_subprocess_run = subprocess.run
+
+
+def _suppress_or_run(*a, **k):
+    cmd = a[0] if a else []
+    if cmd and cmd[0] == "sudo":
+        logger.info("suppressed subprocess.run: %s", cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout=b"", stderr=b"")
+    return _real_subprocess_run(*a, **k)
+
+
+mock.patch("webserver.server.subprocess.run", side_effect=_suppress_or_run).start()
 mock.patch(
     "webserver.server.os.system",
     side_effect=lambda cmd: logger.info("suppressed os.system: %s", cmd),

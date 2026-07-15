@@ -2,8 +2,11 @@ import io
 import logging
 import os
 import re
+import struct
 import subprocess
 import sys
+import tempfile
+import wave
 import zipfile
 from io import BytesIO
 from pathlib import Path
@@ -453,6 +456,96 @@ def system_status():
     except Exception as e:
         logger.error(f"Error getting system status: {e}")
         return jsonify({"success": False, "message": str(e)}), 500
+
+
+@app.route("/api/audio-test/mic-level", methods=["POST"])
+def test_mic_level():
+    """Record a short mic sample using the current input settings and return its signal level."""
+    current_config = load_config()
+    hw_mapping = str(current_config.get("alsa_hw_mapping", "default"))
+    channels = int(current_config.get("channels") or 1)
+    sample_rate = int(current_config.get("sample_rate") or 44100)
+    duration = 2
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir) / "mic_test.wav"
+        cmd = [
+            "arecord", "-q",
+            "-D", hw_mapping,
+            "-f", "S16_LE",
+            "-c", str(channels),
+            "-r", str(sample_rate),
+            "-d", str(duration),
+            str(tmp_path),
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, timeout=duration + 5)
+        except FileNotFoundError:
+            return jsonify({"success": False, "message": "'arecord' not found. Is ALSA installed?"}), 500
+        except subprocess.TimeoutExpired:
+            return jsonify({"success": False, "message": "Recording timed out."}), 500
+
+        if result.returncode != 0:
+            stderr = result.stderr.decode(errors="ignore").strip()
+            logger.error(f"arecord failed: {stderr}")
+            return jsonify({"success": False, "message": f"Recording failed: {stderr or 'unknown error'}"}), 500
+
+        try:
+            with wave.open(str(tmp_path), "rb") as wf:
+                frames = wf.readframes(wf.getnframes())
+                sampwidth = wf.getsampwidth()
+        except Exception as e:
+            logger.error(f"Could not read mic test recording: {e}")
+            return jsonify({"success": False, "message": f"Could not read recorded audio: {e}"}), 500
+
+    if not frames or sampwidth != 2:
+        return jsonify({"success": False, "message": "No audio captured. Check your microphone wiring."}), 500
+
+    samples = struct.unpack(f"<{len(frames) // 2}h", frames)
+    peak = max(abs(s) for s in samples)
+    rms = (sum(s * s for s in samples) / len(samples)) ** 0.5
+    max_possible = 32767.0
+
+    return jsonify({
+        "success": True,
+        "peak_percent": round(min(peak / max_possible, 1.0) * 100, 1),
+        "rms_percent": round(min(rms / max_possible, 1.0) * 100, 1),
+    })
+
+
+@app.route("/api/audio-test/play-sample", methods=["POST"])
+def test_play_sample():
+    """Play a bundled sample sound through the configured output device to test speaker wiring."""
+    current_config = load_config()
+    hw_mapping = str(current_config.get("alsa_hw_mapping", "default"))
+    mixer_control = str(current_config.get("mixer_control_name", "Speaker"))
+    sample_file = BASE_DIR / "sounds" / "beep.wav"
+
+    if not sample_file.exists():
+        return jsonify({"success": False, "message": f"Sample file not found: {sample_file}"}), 404
+
+    subprocess.run(
+        ["amixer", "set", mixer_control, "80%"], check=False,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+    try:
+        result = subprocess.run(
+            ["aplay", "-q", "-D", hw_mapping, str(sample_file)],
+            capture_output=True, timeout=10,
+        )
+    except FileNotFoundError:
+        return jsonify({"success": False, "message": "'aplay' not found. Is ALSA installed?"}), 500
+    except subprocess.TimeoutExpired:
+        return jsonify({"success": False, "message": "Playback timed out."}), 500
+
+    if result.returncode != 0:
+        stderr = result.stderr.decode(errors="ignore").strip()
+        logger.error(f"aplay failed: {stderr}")
+        return jsonify({"success": False, "message": f"Playback failed: {stderr or 'unknown error'}"}), 500
+
+    return jsonify({"success": True, "message": "Playback finished."})
+
 
 @app.route("/delete-recordings", methods=["POST"])
 def delete_recordings():

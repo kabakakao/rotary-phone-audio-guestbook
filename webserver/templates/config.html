@@ -164,6 +164,50 @@
     </div>
   </div>
 
+  <!-- Audio Test Card -->
+  <div class="card">
+    <div class="bg-primary dark:bg-dark-primary p-2 lg:p-4 rounded-t">
+      <h2 class="font-bold text-lg text-text dark:text-dark-text">
+        Audio Test
+      </h2>
+    </div>
+    <div class="bg-secondary dark:bg-dark-secondary text-text dark:text-dark-text shadow-md p-4 rounded-b">
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <!-- Microphone (input) test -->
+        <div>
+          <h3 class="font-semibold mb-2 pb-1 border-b border-gray-200 dark:border-gray-700">
+            Microphone (Input)
+          </h3>
+          <p class="text-xs text-gray-500 dark:text-gray-400 mb-3">
+            Records ~2 seconds with the settings above and shows the signal level. Speak into the mic while it
+            records.
+          </p>
+          <button type="button" id="mic-test-btn" class="btn-primary px-4 py-2 mb-3">
+            <i class="fas fa-microphone mr-2"></i><span id="mic-test-btn-label">Test Microphone</span>
+          </button>
+          <div class="w-full h-4 bg-gray-200 dark:bg-gray-700 rounded overflow-hidden">
+            <div id="mic-level-bar" class="h-full bg-green-500 transition-all duration-150" style="width: 0%"></div>
+          </div>
+          <div id="mic-test-result" class="text-xs text-gray-500 dark:text-gray-400 mt-2"></div>
+        </div>
+
+        <!-- Speaker (output) test -->
+        <div>
+          <h3 class="font-semibold mb-2 pb-1 border-b border-gray-200 dark:border-gray-700">
+            Speaker (Output)
+          </h3>
+          <p class="text-xs text-gray-500 dark:text-gray-400 mb-3">
+            Plays a short sample sound through the currently configured output device and volume.
+          </p>
+          <button type="button" id="speaker-test-btn" class="btn-primary px-4 py-2 mb-3">
+            <i class="fas fa-volume-up mr-2"></i><span id="speaker-test-btn-label">Play Test Sound</span>
+          </button>
+          <div id="speaker-test-result" class="text-xs text-gray-500 dark:text-gray-400 mt-2"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Recording Settings Card -->
   <div class="card">
     <div class="bg-primary dark:bg-dark-primary p-2 lg:p-4 rounded-t">
@@ -317,6 +361,73 @@
         label.textContent = filename;
       }
     });
+  });
+
+  // Microphone (input) test
+  const micTestBtn = document.getElementById("mic-test-btn");
+  const micTestBtnLabel = document.getElementById("mic-test-btn-label");
+  const micLevelBar = document.getElementById("mic-level-bar");
+  const micTestResult = document.getElementById("mic-test-result");
+
+  micTestBtn?.addEventListener("click", async () => {
+    micTestBtn.disabled = true;
+    micTestBtn.classList.add("opacity-60", "cursor-not-allowed");
+    micTestBtnLabel.textContent = "Recording (2s)...";
+    micLevelBar.style.width = "0%";
+    micLevelBar.classList.remove("bg-red-500", "bg-yellow-500", "bg-green-500");
+    micTestResult.textContent = "";
+
+    try {
+      const response = await fetch("{{ url_for('test_mic_level') }}", { method: "POST" });
+      const data = await response.json();
+
+      if (data.success) {
+        const level = data.peak_percent;
+        micLevelBar.style.width = `${level}%`;
+        micLevelBar.classList.add(level > 90 ? "bg-red-500" : level > 5 ? "bg-green-500" : "bg-yellow-500");
+        micTestResult.textContent = level <= 5
+          ? `Peak ${level}% / RMS ${data.rms_percent}% — signal looks very quiet, check the microphone connection.`
+          : `Peak ${level}% / RMS ${data.rms_percent}%`;
+      } else {
+        micLevelBar.classList.add("bg-red-500");
+        micLevelBar.style.width = "100%";
+        micTestResult.textContent = data.message || "Microphone test failed.";
+      }
+    } catch (err) {
+      micLevelBar.classList.add("bg-red-500");
+      micLevelBar.style.width = "100%";
+      micTestResult.textContent = `Error: ${err.message}`;
+    } finally {
+      micTestBtn.disabled = false;
+      micTestBtn.classList.remove("opacity-60", "cursor-not-allowed");
+      micTestBtnLabel.textContent = "Test Microphone";
+    }
+  });
+
+  // Speaker (output) test
+  const speakerTestBtn = document.getElementById("speaker-test-btn");
+  const speakerTestBtnLabel = document.getElementById("speaker-test-btn-label");
+  const speakerTestResult = document.getElementById("speaker-test-result");
+
+  speakerTestBtn?.addEventListener("click", async () => {
+    speakerTestBtn.disabled = true;
+    speakerTestBtn.classList.add("opacity-60", "cursor-not-allowed");
+    speakerTestBtnLabel.textContent = "Playing...";
+    speakerTestResult.textContent = "";
+
+    try {
+      const response = await fetch("{{ url_for('test_play_sample') }}", { method: "POST" });
+      const data = await response.json();
+      speakerTestResult.textContent = data.message || (data.success ? "Playback finished." : "Playback failed.");
+      speakerTestResult.classList.toggle("text-red-500", !data.success);
+    } catch (err) {
+      speakerTestResult.textContent = `Error: ${err.message}`;
+      speakerTestResult.classList.add("text-red-500");
+    } finally {
+      speakerTestBtn.disabled = false;
+      speakerTestBtn.classList.remove("opacity-60", "cursor-not-allowed");
+      speakerTestBtnLabel.textContent = "Play Test Sound";
+    }
   });
 </script>
 {% endblock %}
