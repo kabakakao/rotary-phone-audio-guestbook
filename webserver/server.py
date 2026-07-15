@@ -458,6 +458,56 @@ def system_status():
         return jsonify({"success": False, "message": str(e)}), 500
 
 
+def _c_locale_env():
+    """Env with LC_ALL/LANG forced to C so ALSA tool output stays in English and parseable,
+    regardless of the system's configured locale (e.g. a German Raspberry Pi OS install)."""
+    env = os.environ.copy()
+    env["LC_ALL"] = "C"
+    env["LANG"] = "C"
+    return env
+
+
+def _list_capture_devices():
+    """Return a list of 'plughw:CARD=<id>,DEV=<n>' strings for cards that support capture."""
+    try:
+        result = subprocess.run(["arecord", "-l"], capture_output=True, timeout=5, env=_c_locale_env())
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+
+    devices = []
+    # Typical line: "card 1: Device [USB Audio Device], device 0: USB Audio [USB Audio]"
+    for match in re.finditer(
+        r"card\s+\d+:\s+(?P<card>\S+)\s+\[.*?\],\s*device\s+(?P<dev>\d+):", result.stdout.decode(errors="ignore")
+    ):
+        devices.append(f"plughw:CARD={match.group('card')},DEV={match.group('dev')}")
+    return devices
+
+
+def _friendly_alsa_error(stderr, hw_mapping, is_playback=False):
+    """Translate common ALSA error output into an actionable message for the user."""
+    action = "Playback" if is_playback else "Recording"
+    if "capture slave is not defined" in stderr or ("asym" in stderr and "capture" in stderr):
+        suggestions = _list_capture_devices()
+        hint = (
+            f" Your system does have a capture-capable device though: try setting 'ALSA Hardware Mapping' to "
+            f"'{suggestions[0]}' in the Audio settings above."
+            if suggestions
+            else " No capture-capable sound card was detected at all (run 'arecord -l' on the Pi to check)."
+        )
+        return (
+            f"The ALSA device '{hw_mapping}' is set up for playback only and has no microphone input configured "
+            f"(this is common with the Raspberry Pi's built-in headphone jack, or a stale /etc/asound.conf). "
+            f"Plug in a USB sound card/microphone and reboot, or set 'alsa_hw_mapping' to point directly at your "
+            f"capture device (see 'arecord -l' on the Pi)." + hint
+        )
+    if "playback slave is not defined" in stderr:
+        return (
+            f"The ALSA device '{hw_mapping}' is set up for capture only and has no speaker output configured. "
+            f"Set 'alsa_hw_mapping' to point directly at your playback device (see 'aplay -l' on the Pi)."
+        )
+    return f"{action} failed: {stderr or 'unknown error'}"
+
+
 @app.route("/api/audio-test/mic-level", methods=["POST"])
 def test_mic_level():
     """Record a short mic sample using the current input settings and return its signal level."""
@@ -479,7 +529,7 @@ def test_mic_level():
             str(tmp_path),
         ]
         try:
-            result = subprocess.run(cmd, capture_output=True, timeout=duration + 5)
+            result = subprocess.run(cmd, capture_output=True, timeout=duration + 5, env=_c_locale_env())
         except FileNotFoundError:
             return jsonify({"success": False, "message": "'arecord' not found. Is ALSA installed?"}), 500
         except subprocess.TimeoutExpired:
@@ -488,7 +538,7 @@ def test_mic_level():
         if result.returncode != 0:
             stderr = result.stderr.decode(errors="ignore").strip()
             logger.error(f"arecord failed: {stderr}")
-            return jsonify({"success": False, "message": f"Recording failed: {stderr or 'unknown error'}"}), 500
+            return jsonify({"success": False, "message": _friendly_alsa_error(stderr, hw_mapping)}), 500
 
         try:
             with wave.open(str(tmp_path), "rb") as wf:
@@ -532,7 +582,7 @@ def test_play_sample():
     try:
         result = subprocess.run(
             ["aplay", "-q", "-D", hw_mapping, str(sample_file)],
-            capture_output=True, timeout=10,
+            capture_output=True, timeout=10, env=_c_locale_env(),
         )
     except FileNotFoundError:
         return jsonify({"success": False, "message": "'aplay' not found. Is ALSA installed?"}), 500
@@ -542,7 +592,7 @@ def test_play_sample():
     if result.returncode != 0:
         stderr = result.stderr.decode(errors="ignore").strip()
         logger.error(f"aplay failed: {stderr}")
-        return jsonify({"success": False, "message": f"Playback failed: {stderr or 'unknown error'}"}), 500
+        return jsonify({"success": False, "message": _friendly_alsa_error(stderr, hw_mapping, is_playback=True)}), 500
 
     return jsonify({"success": True, "message": "Playback finished."})
 
