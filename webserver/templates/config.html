@@ -1,6 +1,22 @@
 {% extends "base.html" %} {% block title %}{{ title }} - Settings{% endblock
 %} {% block content %}
 
+{% macro select_field(field, label, options, current) %}
+<div class="mb-2 lg:mb-4">
+  <label for="{{ field }}" class="block mb-1 lg:mb-2">{{ label }}</label>
+  <select id="{{ field }}" name="{{ field }}"
+    class="w-full px-3 py-2 border rounded bg-background dark:bg-dark-input-background text-text-primary dark:text-dark-input-text">
+    {% set current_str = current|string %}
+    {% for opt in options %}
+    <option value="{{ opt }}" {% if current_str==opt|string %}selected{% endif %}>{{ opt }}</option>
+    {% endfor %}
+    {% if current_str not in options|map('string')|list %}
+    <option value="{{ current }}" selected>{{ current }} (current)</option>
+    {% endif %}
+  </select>
+</div>
+{% endmacro %}
+
 <h1 class="text-3xl font-bold text-center mb-8">Edit Configuration</h1>
 
 {% with messages = get_flashed_messages(with_categories=true) %} {% if messages
@@ -20,14 +36,17 @@
         </h2>
       </div>
       <div class="bg-secondary dark:bg-dark-secondary text-text dark:text-dark-text shadow-md p-4 rounded-b">
-        {% for field in ['alsa_hw_mapping', 'mixer_control_name', 'format',
-        'file_type', 'channels', 'sample_rate'] %}
+        {% for field in ['alsa_hw_mapping', 'mixer_control_name', 'sample_rate'] %}
         <div class="mb-2 lg:mb-4">
           <label for="{{ field }}" class="block mb-1 lg:mb-2">{{ field|replace('_', ' ')|title }}</label>
           <input type="text" id="{{ field }}" name="{{ field }}" value="{{ config[field] }}"
             class="w-full px-3 py-2 border rounded bg-background dark:bg-dark-input-background text-text-primary dark:text-dark-input-text" />
         </div>
         {% endfor %}
+        {{ select_field('format', 'Format', ['cd', 'cdr', 'dat', 's16_le', 's24_le', 's32_le', 'u8', 'float_le'], config['format']) }}
+        {{ select_field('file_type', 'File Type', ['wav', 'mp3', 'ogg'], config['file_type']) }}
+        <span class="text-xs text-gray-500 dark:text-gray-400 block -mt-2 mb-2">"mp3"/"ogg" require ffmpeg to be installed.</span>
+        {{ select_field('channels', 'Channels', [1, 2], config['channels']) }}
       </div>
     </div>
 
@@ -180,11 +199,7 @@
       </div>
 
       <!-- Hook Type -->
-      <div class="mb-2 lg:mb-4">
-        <label for="hook_type" class="block mb-1 lg:mb-2">Hook Type</label>
-        <input type="text" id="hook_type" name="hook_type" value="{{ config['hook_type'] }}"
-          class="w-full px-3 py-2 border rounded bg-background dark:bg-dark-input-background text-text-primary dark:text-dark-input-text" />
-      </div>
+      {{ select_field('hook_type', 'Hook Type', ['NC', 'NO'], config['hook_type']) }}
 
       <!-- Invert Hook -->
       <div class="mb-2 lg:mb-4">
@@ -230,12 +245,7 @@
       </div>
 
       <!-- Record Greeting Type -->
-      <div class="mb-2 lg:mb-4">
-        <label for="record_greeting_type" class="block mb-1 lg:mb-2">Record Greeting Type</label>
-        <input type="text" id="record_greeting_type" name="record_greeting_type"
-          value="{{ config['record_greeting_type'] }}"
-          class="w-full px-3 py-2 border rounded bg-background dark:bg-dark-input-background text-text-primary dark:text-dark-input-text" />
-      </div>
+      {{ select_field('record_greeting_type', 'Record Greeting Type', ['NC', 'NO'], config['record_greeting_type']) }}
 
       <!-- Record Greeting Bounce Time -->
       <div class="mb-2 lg:mb-4">

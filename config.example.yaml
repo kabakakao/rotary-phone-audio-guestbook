@@ -11,7 +11,7 @@
 alsa_hw_mapping: default
 mixer_control_name: Speaker # look at amixer scontrols for available controls
 format: cd # look at aplay --help for available formats
-file_type: wav
+file_type: wav # wav (default), mp3 or ogg. mp3/ogg require ffmpeg to be installed.
 channels: 2
 hook_gpio: 22
 hook_type: NC # or 'NO' depending on your hardware configuration

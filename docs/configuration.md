@@ -43,7 +43,7 @@ In `config.yaml`, you can customize audio format settings:
 - `alsa_hw_mapping`: The ALSA hardware mapping for your audio interface (e.g., "plughw:1,0")
 - `mixer_control_name`: The mixer control name to use for volume adjustment (e.g., "Speaker")
 - `format`: Audio format to use (default is "cd" - see `aplay --help` for other options)
-- `file_type`: Output file format (default is "wav")
+- `file_type`: Output file format for guest recordings - `wav` (default), `mp3` or `ogg`. Playback of greeting/beep/time_exceeded files also supports these three types, detected from the uploaded file's extension. `mp3`/`ogg` require `ffmpeg` to be installed (`sudo apt install ffmpeg`); `wav` uses `arecord`/`aplay` only.
 - `channels`: Number of audio channels (2 for stereo, 1 for mono)
 - `sample_rate`: Recording sample rate in Hz (default is 44100)
 

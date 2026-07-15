@@ -69,9 +69,15 @@ def is_on_hook(pin, hook_type, invert_hook):
     
     return on_hook
 
-def play_wav_interruptible(file_path, pin_hook, hw_mapping, volume, mixer_control, hook_type, invert_hook):
+# File types that arecord/aplay can handle natively.
+NATIVE_FILE_TYPES = {"wav", "raw", "au", "voc"}
+# File types that require ffmpeg for encoding/decoding (not understood by arecord/aplay).
+FFMPEG_FILE_TYPES = {"mp3", "ogg"}
+
+
+def play_audio_interruptible(file_path, pin_hook, hw_mapping, volume, mixer_control, hook_type, invert_hook):
     """
-    Play a WAV file with aplay, checking GPIO during playback.
+    Play an audio file (wav via aplay, or mp3/ogg via ffmpeg), checking GPIO during playback.
     Returns True if played to completion, False if interrupted by on-hook.
     """
     if not Path(file_path).exists():
@@ -81,11 +87,17 @@ def play_wav_interruptible(file_path, pin_hook, hw_mapping, volume, mixer_contro
     logger.info(f"Playing: {Path(file_path).name}")
     set_volume(volume, mixer_control)
     
-    proc = subprocess.Popen(
-        ["aplay", "-q", "-D", hw_mapping, str(file_path)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
-    )
+    ext = Path(file_path).suffix.lower().lstrip('.')
+    if ext in FFMPEG_FILE_TYPES:
+        cmd = ["ffmpeg", "-nostdin", "-loglevel", "error", "-i", str(file_path), "-f", "alsa", hw_mapping]
+    else:
+        cmd = ["aplay", "-q", "-D", hw_mapping, str(file_path)]
+    
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except FileNotFoundError:
+        logger.error(f"'{cmd[0]}' not found. Install it to play .{ext} files (e.g. 'sudo apt install ffmpeg').")
+        return False
     
     try:
         while proc.poll() is None:
@@ -105,43 +117,60 @@ def play_wav_interruptible(file_path, pin_hook, hw_mapping, volume, mixer_contro
     
     return True
 
+def record_audio(out_file, config):
+    """
+    Start a recording process writing to out_file. Uses arecord for native
+    formats (wav/raw/au/voc) and ffmpeg for mp3/ogg, chosen by out_file's extension.
+    """
+    ext = Path(out_file).suffix.lower().lstrip('.')
+    
+    if ext in FFMPEG_FILE_TYPES:
+        cmd = [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-f", "alsa",
+            "-ar", str(config['sample_rate']),
+            "-ac", str(config['channels']),
+            "-i", config['alsa_hw_mapping'],
+            str(out_file)
+        ]
+    else:
+        arecord_type = ext if ext in NATIVE_FILE_TYPES else "wav"
+        cmd = [
+            "arecord", "-q",
+            "-f", config['format'],
+            "-t", arecord_type,
+            "-D", config['alsa_hw_mapping'],
+            "-r", str(config['sample_rate']),
+            "-c", str(config['channels']),
+            str(out_file)
+        ]
+    
+    try:
+        return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except FileNotFoundError:
+        logger.error(f"'{cmd[0]}' not found. Install it to record .{ext} files (e.g. 'sudo apt install ffmpeg').")
+        return None
+
 def start_recording(config):
-    """Start arecord process for guest recording."""
+    """Start recording process for guest recording."""
     timestamp = datetime.now().isoformat().replace(':','-')
     recordings_path = Path(config['recordings_path'])
     recordings_path.mkdir(exist_ok=True)
     
-    out_file = recordings_path / f"{timestamp}.wav"
+    ext = config.get('file_type', 'wav')
+    out_file = recordings_path / f"{timestamp}.{ext}"
     logger.info(f"Recording to: {out_file.name}")
     
-    proc = subprocess.Popen([
-        "arecord", "-q",
-        "-f", config['format'],
-        "-t", config['file_type'],
-        "-D", config['alsa_hw_mapping'],
-        "-r", str(config['sample_rate']),
-        "-c", str(config['channels']),
-        str(out_file)
-    ])
-    return proc
+    return record_audio(out_file, config)
 
 def start_recording_greeting(config):
-    """Start arecord process for recording greeting message."""
+    """Start recording process for recording greeting message."""
     greeting_path = Path(config['greeting'])
     greeting_path.parent.mkdir(exist_ok=True)
     
     logger.info(f"Recording greeting to: {greeting_path.name}")
     
-    proc = subprocess.Popen([
-        "arecord", "-q",
-        "-f", config['format'],
-        "-t", config['file_type'],
-        "-D", config['alsa_hw_mapping'],
-        "-r", str(config['sample_rate']),
-        "-c", str(config['channels']),
-        str(greeting_path)
-    ])
-    return proc
+    return record_audio(greeting_path, config)
 
 def stop_recording(proc, name="recording"):
     """Stop an arecord process if running."""
@@ -256,7 +285,7 @@ def main():
                         continue
                 
                 # Play greeting (interruptible)
-                if not play_wav_interruptible(
+                if not play_audio_interruptible(
                     config['greeting'],
                     config['hook_gpio'],
                     config['alsa_hw_mapping'],
@@ -274,7 +303,7 @@ def main():
                     time.sleep(beep_delay)
                 
                 # Play beep (interruptible)
-                if not play_wav_interruptible(
+                if not play_audio_interruptible(
                     config['beep'],
                     config['hook_gpio'],
                     config['alsa_hw_mapping'],
@@ -309,7 +338,7 @@ def main():
                     recording_start_ts = None
                     
                     # Play time exceeded message (interruptible)
-                    play_wav_interruptible(
+                    play_audio_interruptible(
                         config['time_exceeded'],
                         config['hook_gpio'],
                         config['alsa_hw_mapping'],
@@ -358,7 +387,7 @@ def main():
                     logger.info("\n[RECORD GREETING] Button pressed - recording new greeting")
                     
                     # Play beep to indicate recording start
-                    play_wav_interruptible(
+                    play_audio_interruptible(
                         config['beep'],
                         config['record_greeting_gpio'],  # Use record button as interrupt
                         config['alsa_hw_mapping'],

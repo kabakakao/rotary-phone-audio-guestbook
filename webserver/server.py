@@ -210,6 +210,14 @@ def serve_recording(filename):
     # Get file size for range requests
     file_size = file_path.stat().st_size
 
+    # Pick mimetype based on file extension so the browser's audio player
+    # decodes wav/mp3/ogg files correctly.
+    mimetype = {
+        ".wav": "audio/wav",
+        ".mp3": "audio/mpeg",
+        ".ogg": "audio/ogg",
+    }.get(file_path.suffix.lower(), "audio/wav")
+
     # Parse Range header
     range_header = request.headers.get('Range', None)
 
@@ -233,7 +241,7 @@ def serve_recording(filename):
         resp = Response(
             generate_file_chunks(str(file_path), byte1, byte2),
             status=206,
-            mimetype='audio/wav',
+            mimetype=mimetype,
             direct_passthrough=True
         )
 
@@ -245,7 +253,7 @@ def serve_recording(filename):
     # If no range header, serve the whole file
     resp = Response(
         generate_file_chunks(str(file_path), 0, file_size - 1),
-        mimetype='audio/wav'
+        mimetype=mimetype
     )
     resp.headers.add('Accept-Ranges', 'bytes')
     resp.headers.add('Content-Length', str(file_size))
@@ -273,12 +281,12 @@ def download_all():
     """Download all recordings as a zip file."""
     memory_file = io.BytesIO()
     with zipfile.ZipFile(memory_file, "w") as zf:
-        wav_files = [f for f in recordings_path.iterdir() if f.is_file() and f.suffix.lower() == ".wav"]
+        audio_files = [f for f in recordings_path.iterdir() if f.is_file() and f.suffix.lower() in (".wav", ".mp3", ".ogg")]
 
         # Log the files being added to the zip
-        logger.info(f"Adding {len(wav_files)} files to zip")
+        logger.info(f"Adding {len(audio_files)} files to zip")
 
-        for file_path in wav_files:
+        for file_path in audio_files:
             # Use absolute path for reading
             abs_path = str(file_path.absolute())
             logger.info(f"Adding file: {abs_path}")

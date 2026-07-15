@@ -90,6 +90,7 @@ apt-get install -y --no-install-recommends \
     python3-ruamel.yaml \
     python3-psutil \
     alsa-utils \
+    ffmpeg \
     network-manager \
     git
 # gpiozero on Trixie must use the lgpio backend (RPi.GPIO no longer works on
