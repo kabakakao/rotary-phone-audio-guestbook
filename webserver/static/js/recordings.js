@@ -398,5 +398,80 @@ function isMobileDevice() {
 
 // Initialize recordings on page load
 document.addEventListener("DOMContentLoaded", function () {
+  const simulateHookUpButton = document.getElementById("simulate-hook-up");
+
+  function setHookButtonState(isOffHook) {
+    if (!simulateHookUpButton) return;
+    if (isOffHook) {
+      simulateHookUpButton.dataset.hookState = "off_hook";
+      simulateHookUpButton.classList.remove("bg-amber-500", "hover:bg-amber-600");
+      simulateHookUpButton.classList.add("bg-rose-500", "hover:bg-rose-600");
+      simulateHookUpButton.innerHTML = '<i class="fas fa-phone-slash mr-2"></i>Simulate Hook Down';
+    } else {
+      simulateHookUpButton.dataset.hookState = "on_hook";
+      simulateHookUpButton.classList.remove("bg-rose-500", "hover:bg-rose-600");
+      simulateHookUpButton.classList.add("bg-amber-500", "hover:bg-amber-600");
+      simulateHookUpButton.innerHTML = '<i class="fas fa-phone mr-2"></i>Simulate Hook Up';
+    }
+  }
+
+  async function syncHookStatus() {
+    if (!simulateHookUpButton) return;
+    try {
+      const response = await fetch("/api/library-mode/hook-status");
+      const data = await response.json();
+      setHookButtonState(Boolean(data.off_hook));
+    } catch (error) {
+      console.error("Failed to read hook status:", error);
+      setHookButtonState(false);
+    }
+  }
+
+  simulateHookUpButton?.addEventListener("click", async function () {
+    const wasOffHook = simulateHookUpButton.dataset.hookState === "off_hook";
+    const endpoint = wasOffHook
+      ? "/api/library-mode/simulate-hook-down"
+      : "/api/library-mode/simulate-hook-up";
+
+    const originalHtml = simulateHookUpButton.innerHTML;
+    simulateHookUpButton.disabled = true;
+    simulateHookUpButton.classList.add("opacity-60", "cursor-not-allowed");
+    simulateHookUpButton.innerHTML = wasOffHook
+      ? '<i class="fas fa-spinner fa-spin mr-2"></i>Stopping...'
+      : '<i class="fas fa-spinner fa-spin mr-2"></i>Starting...';
+
+    try {
+      const response = await fetch(endpoint, { method: "POST" });
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        throw new Error(data.message || "Simulation failed.");
+      }
+
+      setHookButtonState(Boolean(data.off_hook));
+      if (typeof showToast === "function") {
+        showToast(data.message || "Simulated hook-up finished.", "success");
+      }
+
+      // If hook-down stopped a recording, reload list so new file appears immediately.
+      if (!data.off_hook) {
+        loadRecordings();
+      }
+    } catch (error) {
+      if (typeof showToast === "function") {
+        showToast(`Simulation failed: ${error.message}`, "error");
+      } else {
+        alert(`Simulation failed: ${error.message}`);
+      }
+      simulateHookUpButton.innerHTML = originalHtml;
+    } finally {
+      simulateHookUpButton.disabled = false;
+      simulateHookUpButton.classList.remove("opacity-60", "cursor-not-allowed");
+      if (!simulateHookUpButton.dataset.hookState) {
+        simulateHookUpButton.innerHTML = originalHtml;
+      }
+    }
+  });
+
+  syncHookStatus();
   loadRecordings();
 });

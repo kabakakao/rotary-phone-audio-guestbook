@@ -6,8 +6,10 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import wave
 import zipfile
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 
@@ -93,6 +95,16 @@ elif not recordings_path.is_dir():
     sys.exit(1)
 else:
     logger.info(f"Recordings directory verified: {recordings_path}")
+
+# File types that arecord/aplay can handle natively.
+NATIVE_FILE_TYPES = {"wav", "raw", "au", "voc"}
+# File types that require ffmpeg for encoding/decoding.
+FFMPEG_FILE_TYPES = {"mp3", "ogg"}
+
+# Library-mode virtual hook runtime state (webserver process only).
+library_recording_proc = None
+library_recording_file = None
+library_recording_started_at = None
 
 def normalize_path(path):
     """Normalize and convert paths to Unix format."""
@@ -526,6 +538,111 @@ def _set_amixer_percent(mixer_control, percent, capture=False):
     subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def _resolve_config_audio_path(path_value):
+    """Resolve configured audio paths against BASE_DIR when relative."""
+    path = Path(str(path_value))
+    if not path.is_absolute():
+        path = BASE_DIR / path
+    return path
+
+
+def _play_audio_once(file_path, hw_mapping, mixer_control, level, gain):
+    """Play one file once via ALSA with optional software gain."""
+    if not file_path.exists():
+        return False, f"Audio file not found: {file_path}"
+
+    output_level = _clamp_float(level, 1.0, 0.0, 1.0)
+    gain = _clamp_float(gain, 1.0, 0.1, 4.0)
+    _set_amixer_percent(mixer_control, int(output_level * 100), capture=False)
+
+    ext = file_path.suffix.lower()
+    use_ffmpeg = ext in (".mp3", ".ogg") or abs(gain - 1.0) > 1e-6
+
+    if use_ffmpeg:
+        cmd = ["ffmpeg", "-nostdin", "-loglevel", "error", "-i", str(file_path)]
+        if abs(gain - 1.0) > 1e-6:
+            cmd.extend(["-filter:a", f"volume={gain}"])
+        cmd.extend(["-f", "alsa", hw_mapping])
+    else:
+        cmd = ["aplay", "-q", "-D", hw_mapping, str(file_path)]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, timeout=20, env=_c_locale_env())
+    except FileNotFoundError:
+        tool = cmd[0]
+        return False, f"'{tool}' not found. Is ALSA/ffmpeg installed?"
+    except subprocess.TimeoutExpired:
+        return False, "Playback timed out."
+
+    if result.returncode != 0:
+        stderr = result.stderr.decode(errors="ignore").strip()
+        logger.error(f"audio playback failed: {stderr}")
+        return False, _friendly_alsa_error(stderr, hw_mapping, is_playback=True)
+
+    return True, "ok"
+
+
+def _build_record_command(out_file, current_config):
+    """Build recording command (arecord or ffmpeg) based on extension and gain."""
+    ext = Path(out_file).suffix.lower().lstrip(".")
+    recording_gain = _clamp_float(current_config.get("recording_gain", 1.0), 1.0, 0.1, 4.0)
+    requires_ffmpeg = ext in FFMPEG_FILE_TYPES or abs(recording_gain - 1.0) > 1e-6
+
+    if requires_ffmpeg:
+        cmd = [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-f", "alsa",
+            "-ar", str(int(current_config.get("sample_rate") or 44100)),
+            "-ac", str(int(current_config.get("channels") or 1)),
+            "-i", str(current_config.get("alsa_hw_mapping", "default")),
+        ]
+        if abs(recording_gain - 1.0) > 1e-6:
+            cmd.extend(["-filter:a", f"volume={recording_gain}"])
+        cmd.append(str(out_file))
+        return cmd, requires_ffmpeg, ext
+
+    arecord_type = ext if ext in NATIVE_FILE_TYPES else "wav"
+    cmd = [
+        "arecord", "-q",
+        "-f", str(current_config.get("format", "cd")),
+        "-t", arecord_type,
+        "-D", str(current_config.get("alsa_hw_mapping", "default")),
+        "-r", str(int(current_config.get("sample_rate") or 44100)),
+        "-c", str(int(current_config.get("channels") or 1)),
+        str(out_file),
+    ]
+    return cmd, requires_ffmpeg, ext
+
+
+def _library_hook_state_payload():
+    """Return current library-mode virtual hook state."""
+    global library_recording_proc, library_recording_file, library_recording_started_at
+
+    if library_recording_proc and library_recording_proc.poll() is not None:
+        # Process ended unexpectedly/outside hook-down.
+        library_recording_proc = None
+        library_recording_file = None
+        library_recording_started_at = None
+
+    if library_recording_proc:
+        elapsed = 0
+        if library_recording_started_at:
+            elapsed = max(0, int(time.time() - library_recording_started_at))
+        return {
+            "off_hook": True,
+            "recording": True,
+            "filename": Path(library_recording_file).name if library_recording_file else None,
+            "elapsed_seconds": elapsed,
+        }
+
+    return {
+        "off_hook": False,
+        "recording": False,
+        "filename": None,
+        "elapsed_seconds": 0,
+    }
+
+
 @app.route("/api/audio-test/mic-level", methods=["POST"])
 def test_mic_level():
     """Record a short mic sample using the current input settings and return its signal level."""
@@ -600,61 +717,148 @@ def test_play_sample():
     speaker_test_volume = _clamp_float(current_config.get("speaker_test_volume", 1.0), 1.0, 0.0, 1.0)
     speaker_test_gain = _clamp_float(current_config.get("speaker_test_gain", 1.0), 1.0, 0.1, 4.0)
     speaker_test_percent = int(speaker_test_volume * 100)
-    sample_file = BASE_DIR / "sounds" / "beep.wav"
+    greeting_file = _resolve_config_audio_path(current_config.get("greeting", "sounds/greeting.wav"))
 
-    if not sample_file.exists():
-        return jsonify({"success": False, "message": f"Sample file not found: {sample_file}"}), 404
-
-    subprocess.run(
-        ["amixer", "set", mixer_control, f"{speaker_test_percent}%"], check=False,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    success, message = _play_audio_once(
+        greeting_file,
+        hw_mapping,
+        mixer_control,
+        speaker_test_volume,
+        speaker_test_gain,
     )
-
-    if abs(speaker_test_gain - 1.0) > 1e-6:
-        # Software gain for the test tone; useful when hardware output is still too quiet at 100%.
-        ffmpeg_cmd = [
-            "ffmpeg", "-nostdin", "-loglevel", "error",
-            "-i", str(sample_file),
-            "-filter:a", f"volume={speaker_test_gain}",
-            "-f", "alsa", hw_mapping,
-        ]
-        try:
-            result = subprocess.run(
-                ffmpeg_cmd,
-                capture_output=True, timeout=12, env=_c_locale_env(),
-            )
-        except FileNotFoundError:
-            return jsonify({
-                "success": False,
-                "message": "Software gain requires ffmpeg. Install it with 'sudo apt install ffmpeg' or set speaker_test_gain back to 1.0.",
-            }), 500
-        except subprocess.TimeoutExpired:
-            return jsonify({"success": False, "message": "Playback timed out."}), 500
-
-        if result.returncode != 0:
-            stderr = result.stderr.decode(errors="ignore").strip()
-            logger.error(f"ffmpeg playback failed: {stderr}")
-            return jsonify({"success": False, "message": _friendly_alsa_error(stderr, hw_mapping, is_playback=True)}), 500
-    else:
-        try:
-            result = subprocess.run(
-                ["aplay", "-q", "-D", hw_mapping, str(sample_file)],
-                capture_output=True, timeout=10, env=_c_locale_env(),
-            )
-        except FileNotFoundError:
-            return jsonify({"success": False, "message": "'aplay' not found. Is ALSA installed?"}), 500
-        except subprocess.TimeoutExpired:
-            return jsonify({"success": False, "message": "Playback timed out."}), 500
-
-        if result.returncode != 0:
-            stderr = result.stderr.decode(errors="ignore").strip()
-            logger.error(f"aplay failed: {stderr}")
-            return jsonify({"success": False, "message": _friendly_alsa_error(stderr, hw_mapping, is_playback=True)}), 500
+    if not success:
+        status = 404 if "not found" in message.lower() else 500
+        return jsonify({"success": False, "message": message}), status
 
     return jsonify({
         "success": True,
-        "message": f"Playback finished ({speaker_test_percent}% on '{mixer_control}', gain x{speaker_test_gain}).",
+        "message": f"Greeting playback finished ({speaker_test_percent}% on '{mixer_control}', gain x{speaker_test_gain}).",
     })
+
+
+@app.route("/api/library-mode/simulate-hook-up", methods=["POST"])
+def simulate_hook_up():
+    """Simulate handset lift: greeting+beep and start a recording until hook-down."""
+    global library_recording_proc, library_recording_file, library_recording_started_at
+
+    if library_recording_proc and library_recording_proc.poll() is None:
+        return jsonify({
+            "success": False,
+            "message": "Already off-hook: recording is already running.",
+            **_library_hook_state_payload(),
+        }), 409
+
+    current_config = load_config()
+    hw_mapping = str(current_config.get("alsa_hw_mapping", "default"))
+    mixer_control = str(current_config.get("mixer_control_name", "Speaker"))
+    playback_gain = _clamp_float(current_config.get("playback_gain", 1.0), 1.0, 0.1, 4.0)
+
+    greeting_file = _resolve_config_audio_path(current_config.get("greeting", "sounds/greeting.wav"))
+    beep_file = _resolve_config_audio_path(current_config.get("beep", "sounds/beep.wav"))
+    greeting_volume = _clamp_float(current_config.get("greeting_volume", 1.0), 1.0, 0.0, 1.0)
+    beep_volume = _clamp_float(current_config.get("beep_volume", 1.0), 1.0, 0.0, 1.0)
+    greeting_delay = _clamp_float(current_config.get("greeting_start_delay", 0.0), 0.0, 0.0, 30.0)
+    beep_delay = _clamp_float(current_config.get("beep_start_delay", 0.0), 0.0, 0.0, 30.0)
+
+    if greeting_delay > 0:
+        time.sleep(greeting_delay)
+
+    ok, message = _play_audio_once(greeting_file, hw_mapping, mixer_control, greeting_volume, playback_gain)
+    if not ok:
+        status = 404 if "not found" in message.lower() else 500
+        return jsonify({"success": False, "message": message}), status
+
+    if beep_delay > 0:
+        time.sleep(beep_delay)
+
+    ok, message = _play_audio_once(beep_file, hw_mapping, mixer_control, beep_volume, playback_gain)
+    if not ok:
+        status = 404 if "not found" in message.lower() else 500
+        return jsonify({"success": False, "message": message}), status
+
+    file_type = str(current_config.get("file_type", "wav"))
+    timestamp = datetime.now().isoformat().replace(":", "-")
+    out_file = recordings_path / f"{timestamp}.{file_type}"
+
+    capture_control = str(current_config.get("capture_mixer_control_name", "Capture"))
+    capture_volume = _clamp_float(current_config.get("capture_volume", 1.0), 1.0, 0.0, 1.0)
+    _set_amixer_percent(capture_control, int(capture_volume * 100), capture=True)
+
+    cmd, requires_ffmpeg, ext = _build_record_command(out_file, current_config)
+    try:
+        library_recording_proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except FileNotFoundError:
+        if requires_ffmpeg and ext not in FFMPEG_FILE_TYPES:
+            # Fallback to arecord when ffmpeg is missing but format supports arecord.
+            fallback_cmd = [
+                "arecord", "-q",
+                "-f", str(current_config.get("format", "cd")),
+                "-t", ext if ext in NATIVE_FILE_TYPES else "wav",
+                "-D", str(current_config.get("alsa_hw_mapping", "default")),
+                "-r", str(int(current_config.get("sample_rate") or 44100)),
+                "-c", str(int(current_config.get("channels") or 1)),
+                str(out_file),
+            ]
+            try:
+                library_recording_proc = subprocess.Popen(
+                    fallback_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+            except FileNotFoundError:
+                return jsonify({"success": False, "message": "Recording tools not found (arecord/ffmpeg)."}), 500
+        else:
+            return jsonify({"success": False, "message": "Recording tool not found. Install ffmpeg for this setup."}), 500
+
+    library_recording_file = str(out_file)
+    library_recording_started_at = time.time()
+
+    return jsonify({
+        "success": True,
+        "message": f"Simulated hook-up: greeting/beep played, recording started ({out_file.name}).",
+        **_library_hook_state_payload(),
+    })
+
+
+@app.route("/api/library-mode/simulate-hook-down", methods=["POST"])
+def simulate_hook_down():
+    """Simulate handset down: stop the active virtual-hook recording."""
+    global library_recording_proc, library_recording_file, library_recording_started_at
+
+    if not library_recording_proc or library_recording_proc.poll() is not None:
+        library_recording_proc = None
+        library_recording_file = None
+        library_recording_started_at = None
+        return jsonify({
+            "success": True,
+            "message": "Already on-hook: no active simulation recording.",
+            **_library_hook_state_payload(),
+        })
+
+    finished_file = Path(library_recording_file).name if library_recording_file else None
+    duration = 0
+    if library_recording_started_at:
+        duration = max(0, int(time.time() - library_recording_started_at))
+
+    library_recording_proc.terminate()
+    try:
+        library_recording_proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        library_recording_proc.kill()
+
+    library_recording_proc = None
+    library_recording_file = None
+    library_recording_started_at = None
+
+    return jsonify({
+        "success": True,
+        "message": f"Simulated hook-down: recording saved ({finished_file}, {duration}s).",
+        **_library_hook_state_payload(),
+    })
+
+
+@app.route("/api/library-mode/hook-status", methods=["GET"])
+def library_hook_status():
+    """Return current virtual hook/recording state for the library page."""
+    return jsonify({"success": True, **_library_hook_state_payload()})
 
 
 @app.route("/delete-recordings", methods=["POST"])
