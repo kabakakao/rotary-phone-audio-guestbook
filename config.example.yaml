@@ -48,6 +48,12 @@ recordings_path: __INSTALL_DIR__/recordings
 shutdown_gpio: 0 #Set GPIO pin here --> Note: Pin is active LOW, pull Pin to GND to activate shutdown
 shutdown_button_hold_time: 2 # default 2 seconds
 
+# WS2812B LED (NeoPixel) – set led_gpio to 0 to disable
+# Requires: sudo pip3 install rpi-ws281x
+# Red = on hook (idle) | Yellow = greeting/beep | Green = recording
+led_gpio: 0           # GPIO data pin (e.g. 18 for PWM0 / 21 for PCM)
+led_brightness: 128   # 0-255
+
 # UI Customizations
 ui:
   title: Audio Guestbook # Page title displayed in browser and header

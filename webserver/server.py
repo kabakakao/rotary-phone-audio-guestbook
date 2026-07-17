@@ -6,6 +6,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import wave
 import zipfile
@@ -106,6 +107,11 @@ FFMPEG_FILE_TYPES = {"mp3", "ogg"}
 library_recording_proc = None
 library_recording_file = None
 library_recording_started_at = None
+# "idle" → "playing" (greeting/beep) → "recording" → back to "idle"
+library_phase = "idle"
+_library_abort_event: threading.Event | None = None
+_library_hook_thread: threading.Thread | None = None
+_library_play_proc: subprocess.Popen | None = None  # current playback process (for abort)
 
 # Greeting recording overlay runtime state (webserver process only).
 greeting_record_proc = None
@@ -622,13 +628,24 @@ def _build_record_command(out_file, current_config):
 
 def _library_hook_state_payload():
     """Return current library-mode virtual hook state."""
-    global library_recording_proc, library_recording_file, library_recording_started_at
+    global library_recording_proc, library_recording_file, library_recording_started_at, library_phase
 
     if library_recording_proc and library_recording_proc.poll() is not None:
         # Process ended unexpectedly/outside hook-down.
         library_recording_proc = None
         library_recording_file = None
         library_recording_started_at = None
+        if library_phase == "recording":
+            library_phase = "idle"
+
+    if library_phase == "playing":
+        return {
+            "off_hook": True,
+            "recording": False,
+            "phase": "playing",
+            "filename": None,
+            "elapsed_seconds": 0,
+        }
 
     if library_recording_proc:
         elapsed = 0
@@ -637,6 +654,7 @@ def _library_hook_state_payload():
         return {
             "off_hook": True,
             "recording": True,
+            "phase": "recording",
             "filename": Path(library_recording_file).name if library_recording_file else None,
             "elapsed_seconds": elapsed,
         }
@@ -644,6 +662,7 @@ def _library_hook_state_payload():
     return {
         "off_hook": False,
         "recording": False,
+        "phase": "idle",
         "filename": None,
         "elapsed_seconds": 0,
     }
@@ -931,12 +950,154 @@ def test_play_sample():
     })
 
 
+def _sleep_abortable(seconds: float, abort_event: threading.Event, step: float = 0.05) -> bool:
+    """Sleep for *seconds* in small steps; return False immediately if abort_event is set."""
+    end = time.time() + seconds
+    while time.time() < end:
+        if abort_event.is_set():
+            return False
+        time.sleep(min(step, end - time.time()))
+    return True
+
+
+def _library_simulate_sequence(config: dict, abort_event: threading.Event) -> None:
+    """Background thread: play greeting + beep, then start the recording.
+
+    Modifies the library_* globals once the recording is running.
+    Checks abort_event frequently so simulate_hook_down can interrupt playback.
+    """
+    global library_recording_proc, library_recording_file, library_recording_started_at
+    global library_phase, _library_play_proc
+
+    hw_mapping    = str(config.get("alsa_hw_mapping", "default"))
+    mixer_control = str(config.get("mixer_control_name", "Speaker"))
+    playback_gain = _clamp_float(config.get("playback_gain", 1.0), 1.0, 0.1, 4.0)
+
+    greeting_file   = _resolve_config_audio_path(config.get("greeting", "sounds/greeting.wav"))
+    beep_file       = _resolve_config_audio_path(config.get("beep",     "sounds/beep.wav"))
+    greeting_volume = _clamp_float(config.get("greeting_volume", 1.0), 1.0, 0.0, 1.0)
+    beep_volume     = _clamp_float(config.get("beep_volume",     1.0), 1.0, 0.0, 1.0)
+    greeting_delay  = _clamp_float(config.get("greeting_start_delay", 0.0), 0.0, 0.0, 30.0)
+    beep_delay      = _clamp_float(config.get("beep_start_delay",     0.0), 0.0, 0.0, 30.0)
+
+    def play_abortable(file_path: Path, volume: float) -> bool:
+        """Start playback via Popen; poll until done or aborted. Returns True on completion."""
+        global _library_play_proc
+        if abort_event.is_set() or not file_path.exists():
+            return not abort_event.is_set()
+
+        _set_amixer_percent(mixer_control, int(volume * 100), capture=False)
+        ext        = file_path.suffix.lower()
+        use_ffmpeg = ext in (".mp3", ".ogg") or abs(playback_gain - 1.0) > 1e-6
+
+        if use_ffmpeg:
+            cmd = ["ffmpeg", "-nostdin", "-loglevel", "error", "-i", str(file_path)]
+            if abs(playback_gain - 1.0) > 1e-6:
+                cmd.extend(["-filter:a", f"volume={playback_gain}"])
+            cmd.extend(["-f", "alsa", hw_mapping])
+        else:
+            cmd = ["aplay", "-q", "-D", hw_mapping, str(file_path)]
+
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except FileNotFoundError:
+            logger.warning(f"Playback tool not found: {cmd[0]}")
+            return True  # skip silently
+
+        _library_play_proc = proc
+        try:
+            while proc.poll() is None:
+                if abort_event.is_set():
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                    return False
+                time.sleep(0.05)
+        finally:
+            _library_play_proc = None
+
+        return not abort_event.is_set()
+
+    try:
+        # --- greeting start delay ---
+        if greeting_delay > 0 and not _sleep_abortable(greeting_delay, abort_event):
+            return
+
+        # --- greeting ---
+        if not play_abortable(greeting_file, greeting_volume):
+            return
+
+        # --- beep start delay ---
+        if beep_delay > 0 and not _sleep_abortable(beep_delay, abort_event):
+            return
+
+        # --- beep ---
+        if not play_abortable(beep_file, beep_volume):
+            return
+
+        if abort_event.is_set():
+            return
+
+        # --- start recording ---
+        file_type = str(config.get("file_type", "wav"))
+        timestamp = datetime.now().isoformat().replace(":", "-")
+        out_file  = recordings_path / f"{timestamp}.{file_type}"
+
+        capture_control = str(config.get("capture_mixer_control_name", "Capture"))
+        capture_volume  = _clamp_float(config.get("capture_volume", 1.0), 1.0, 0.0, 1.0)
+        _set_amixer_percent(capture_control, int(capture_volume * 100), capture=True)
+
+        cmd, requires_ffmpeg, ext = _build_record_command(out_file, config)
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except FileNotFoundError:
+            if requires_ffmpeg and ext not in FFMPEG_FILE_TYPES:
+                fallback_cmd = [
+                    "arecord", "-q",
+                    "-f", str(config.get("format", "cd")),
+                    "-t", ext if ext in NATIVE_FILE_TYPES else "wav",
+                    "-D", str(config.get("alsa_hw_mapping", "default")),
+                    "-r", str(int(config.get("sample_rate") or 44100)),
+                    "-c", str(int(config.get("channels") or 1)),
+                    str(out_file),
+                ]
+                try:
+                    proc = subprocess.Popen(
+                        fallback_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                    )
+                except FileNotFoundError:
+                    logger.error("Recording tools not found (arecord/ffmpeg) in simulation.")
+                    return
+            else:
+                logger.error("Recording tool not found in simulation.")
+                return
+
+        library_recording_proc    = proc
+        library_recording_file    = str(out_file)
+        library_recording_started_at = time.time()
+        library_phase = "recording"
+        logger.info(f"Simulation recording started: {out_file.name}")
+
+    except Exception:
+        logger.exception("Unexpected error in simulation sequence")
+    finally:
+        # If we exit before reaching "recording", mark as idle
+        if library_phase == "playing":
+            library_phase = "idle"
+
+
 @app.route("/api/library-mode/simulate-hook-up", methods=["POST"])
 def simulate_hook_up():
-    """Simulate handset lift: greeting+beep and start a recording until hook-down."""
-    global library_recording_proc, library_recording_file, library_recording_started_at
+    """Simulate handset lift: start background playback of greeting+beep, then record.
 
-    if library_recording_proc and library_recording_proc.poll() is None:
+    Returns immediately so the browser is not blocked during the greeting.
+    Use /api/library-mode/hook-status to poll for phase transitions.
+    """
+    global library_phase, _library_abort_event, _library_hook_thread
+
+    if library_phase != "idle":
         return jsonify({
             "success": False,
             "message": "Already off-hook: recording is already running.",
@@ -948,80 +1109,51 @@ def simulate_hook_up():
     mixer_control = str(current_config.get("mixer_control_name", "Speaker"))
     playback_gain = _clamp_float(current_config.get("playback_gain", 1.0), 1.0, 0.1, 4.0)
 
-    greeting_file = _resolve_config_audio_path(current_config.get("greeting", "sounds/greeting.wav"))
-    beep_file = _resolve_config_audio_path(current_config.get("beep", "sounds/beep.wav"))
-    greeting_volume = _clamp_float(current_config.get("greeting_volume", 1.0), 1.0, 0.0, 1.0)
-    beep_volume = _clamp_float(current_config.get("beep_volume", 1.0), 1.0, 0.0, 1.0)
-    greeting_delay = _clamp_float(current_config.get("greeting_start_delay", 0.0), 0.0, 0.0, 30.0)
-    beep_delay = _clamp_float(current_config.get("beep_start_delay", 0.0), 0.0, 0.0, 30.0)
-
-    if greeting_delay > 0:
-        time.sleep(greeting_delay)
-
-    ok, message = _play_audio_once(greeting_file, hw_mapping, mixer_control, greeting_volume, playback_gain)
-    if not ok:
-        status = 404 if "not found" in message.lower() else 500
-        return jsonify({"success": False, "message": message}), status
-
-    if beep_delay > 0:
-        time.sleep(beep_delay)
-
-    ok, message = _play_audio_once(beep_file, hw_mapping, mixer_control, beep_volume, playback_gain)
-    if not ok:
-        status = 404 if "not found" in message.lower() else 500
-        return jsonify({"success": False, "message": message}), status
-
-    file_type = str(current_config.get("file_type", "wav"))
-    timestamp = datetime.now().isoformat().replace(":", "-")
-    out_file = recordings_path / f"{timestamp}.{file_type}"
-
-    capture_control = str(current_config.get("capture_mixer_control_name", "Capture"))
-    capture_volume = _clamp_float(current_config.get("capture_volume", 1.0), 1.0, 0.0, 1.0)
-    _set_amixer_percent(capture_control, int(capture_volume * 100), capture=True)
-
-    cmd, requires_ffmpeg, ext = _build_record_command(out_file, current_config)
-    try:
-        library_recording_proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except FileNotFoundError:
-        if requires_ffmpeg and ext not in FFMPEG_FILE_TYPES:
-            # Fallback to arecord when ffmpeg is missing but format supports arecord.
-            fallback_cmd = [
-                "arecord", "-q",
-                "-f", str(current_config.get("format", "cd")),
-                "-t", ext if ext in NATIVE_FILE_TYPES else "wav",
-                "-D", str(current_config.get("alsa_hw_mapping", "default")),
-                "-r", str(int(current_config.get("sample_rate") or 44100)),
-                "-c", str(int(current_config.get("channels") or 1)),
-                str(out_file),
-            ]
-            try:
-                library_recording_proc = subprocess.Popen(
-                    fallback_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-                )
-            except FileNotFoundError:
-                return jsonify({"success": False, "message": "Recording tools not found (arecord/ffmpeg)."}), 500
-        else:
-            return jsonify({"success": False, "message": "Recording tool not found. Install ffmpeg for this setup."}), 500
-
-    library_recording_file = str(out_file)
-    library_recording_started_at = time.time()
+    abort_event = threading.Event()
+    _library_abort_event = abort_event
+    _library_hook_thread = threading.Thread(
+        target=_library_simulate_sequence,
+        args=(current_config, abort_event),
+        daemon=True,
+        name="library-simulate",
+    )
+    library_phase = "playing"
+    _library_hook_thread.start()
 
     return jsonify({
         "success": True,
-        "message": f"Simulated hook-up: greeting/beep played, recording started ({out_file.name}).",
+        "message": "Simulated hook-up: greeting/beep playing — recording will start automatically.",
         **_library_hook_state_payload(),
     })
 
 
 @app.route("/api/library-mode/simulate-hook-down", methods=["POST"])
 def simulate_hook_down():
-    """Simulate handset down: stop the active virtual-hook recording."""
+    """Simulate handset down: abort playback (if still playing) or stop an active recording."""
     global library_recording_proc, library_recording_file, library_recording_started_at
+    global library_phase, _library_abort_event, _library_hook_thread
+
+    # --- abort ongoing playback (greeting/beep phase) ---
+    if library_phase == "playing" and _library_abort_event is not None:
+        _library_abort_event.set()
+        if _library_hook_thread is not None:
+            _library_hook_thread.join(timeout=3)
+        library_phase = "idle"
+        _library_abort_event = None
+        _library_hook_thread = None
+        return jsonify({
+            "success": True,
+            "message": "Simulated hook-down: playback aborted.",
+            **_library_hook_state_payload(),
+        })
 
     if not library_recording_proc or library_recording_proc.poll() is not None:
         library_recording_proc = None
         library_recording_file = None
         library_recording_started_at = None
+        library_phase = "idle"
+        _library_abort_event = None
+        _library_hook_thread = None
         return jsonify({
             "success": True,
             "message": "Already on-hook: no active simulation recording.",
@@ -1042,6 +1174,9 @@ def simulate_hook_down():
     library_recording_proc = None
     library_recording_file = None
     library_recording_started_at = None
+    library_phase = "idle"
+    _library_abort_event = None
+    _library_hook_thread = None
 
     return jsonify({
         "success": True,

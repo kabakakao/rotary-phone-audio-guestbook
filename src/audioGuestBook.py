@@ -9,6 +9,14 @@ from pathlib import Path
 import os
 import sys
 
+# Optional WS2812B LED support (install rpi-ws281x to enable)
+try:
+    from rpi_ws281x import PixelStrip, Color as _WS2812Color
+    _WS2812_AVAILABLE = True
+except ImportError:
+    _WS2812_AVAILABLE = False
+    _WS2812Color = None
+
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
@@ -29,6 +37,52 @@ def load_config(config_path):
 recording_proc = None
 recording_start_ts = None
 record_greeting_proc = None
+
+# WS2812B LED strip instance (None = disabled or not initialised)
+led_strip = None
+
+# LED hardware constants (sensible defaults for RPi WS2812B wiring)
+_LED_FREQ_HZ = 800000   # 800 kHz signal
+_LED_DMA     = 10       # DMA channel
+_LED_INVERT  = False    # True if using NPN transistor level-shift
+_LED_CHANNEL = 0        # 0 for GPIO 18/12, 1 for GPIO 13/19
+
+
+def setup_led(config):
+    """Initialise a single WS2812B LED on the configured GPIO pin.
+    Set led_gpio: 0 in config to disable."""
+    global led_strip
+    led_gpio = int(config.get('led_gpio', 0))
+    if not _WS2812_AVAILABLE or led_gpio == 0:
+        if led_gpio != 0 and not _WS2812_AVAILABLE:
+            logger.warning("led_gpio is set but rpi_ws281x is not installed – LED disabled. "
+                           "Install with: sudo pip3 install rpi-ws281x")
+        return
+    brightness = max(0, min(int(config.get('led_brightness', 128)), 255))
+    try:
+        strip = PixelStrip(1, led_gpio, _LED_FREQ_HZ, _LED_DMA, _LED_INVERT,
+                           brightness, _LED_CHANNEL)
+        strip.begin()
+        led_strip = strip
+        logger.info(f"WS2812B LED initialised on GPIO {led_gpio}, brightness={brightness}")
+    except Exception as e:
+        logger.warning(f"WS2812B LED setup failed (check wiring / run as root): {e}")
+
+
+def set_led_color(r, g, b):
+    """Set the LED to the given RGB colour. No-op if LED is not initialised."""
+    if led_strip is None:
+        return
+    try:
+        led_strip.setPixelColor(0, _WS2812Color(r, g, b))
+        led_strip.show()
+    except Exception as e:
+        logger.debug(f"LED colour update failed: {e}")
+
+
+def led_off():
+    """Turn the LED off."""
+    set_led_color(0, 0, 0)
 
 
 def _clamp_float(value, default, minimum, maximum):
@@ -265,6 +319,10 @@ def main():
     
     # Hook GPIO (handset)
     GPIO.setup(config['hook_gpio'], GPIO.IN, pull_up_down=GPIO.PUD_UP)
+
+    # LED setup – red = on hook (idle)
+    setup_led(config)
+    set_led_color(255, 0, 0)
     
     # Record greeting button (optional)
     has_record_greeting = config.get('record_greeting_gpio', 0) != 0
@@ -323,7 +381,8 @@ def main():
             # OFF-HOOK: User lifted handset
             if prev_was_on_hook and not currently_on_hook:
                 logger.info("\n[OFF-HOOK] Handset lifted")
-                
+                set_led_color(255, 100, 0)  # Yellow – greeting / beep playing
+
                 # Greeting start delay
                 delay = config.get('greeting_start_delay', 0)
                 if delay > 0:
@@ -372,10 +431,12 @@ def main():
                 if not is_on_hook(config['hook_gpio'], hook_type, invert_hook) and recording_proc is None:
                     recording_proc = start_recording(config)
                     recording_start_ts = time.time()
+                    set_led_color(0, 255, 0)  # Green – recording
             
             # ON-HOOK: User replaced handset
             if not prev_was_on_hook and currently_on_hook:
                 logger.info("[ON-HOOK] Handset replaced")
+                set_led_color(255, 0, 0)  # Red – on hook (idle)
                 if recording_proc:
                     stop_recording(recording_proc)
                     recording_proc = None
@@ -389,7 +450,8 @@ def main():
                     stop_recording(recording_proc)
                     recording_proc = None
                     recording_start_ts = None
-                    
+                    set_led_color(255, 100, 0)  # Yellow – playing time-exceeded message
+
                     # Play time exceeded message (interruptible)
                     play_audio_interruptible(
                         config['time_exceeded'],
@@ -482,6 +544,7 @@ def main():
     finally:
         stop_recording(recording_proc)
         stop_recording(record_greeting_proc, "greeting recording")
+        led_off()
         GPIO.cleanup()
         logger.info("Cleanup complete. Goodbye!")
 

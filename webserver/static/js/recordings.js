@@ -400,36 +400,68 @@ function isMobileDevice() {
 document.addEventListener("DOMContentLoaded", function () {
   const simulateHookUpButton = document.getElementById("simulate-hook-up");
 
-  function setHookButtonState(isOffHook) {
+  // Interval handle for polling hook-status while in "playing" phase
+  let hookStatusPollInterval = null;
+
+  function stopHookStatusPoll() {
+    if (hookStatusPollInterval !== null) {
+      clearInterval(hookStatusPollInterval);
+      hookStatusPollInterval = null;
+    }
+  }
+
+  function setHookButtonState(phase) {
     if (!simulateHookUpButton) return;
-    if (isOffHook) {
+    stopHookStatusPoll();
+
+    if (phase === "playing") {
+      // Greeting/beep is playing – show as off-hook but indicate "playing" state
       simulateHookUpButton.dataset.hookState = "off_hook";
       simulateHookUpButton.classList.remove(
-        "bg-primary",
-        "hover:bg-accent",
-        "dark:bg-dark-primary",
-        "dark:hover:bg-dark-accent",
-        "text-text",
-        "dark:text-dark-text",
-        "border",
-        "border-accent",
-        "dark:border-dark-accent",
+        "bg-primary", "hover:bg-accent",
+        "dark:bg-dark-primary", "dark:hover:bg-dark-accent",
+        "text-text", "dark:text-dark-text",
+        "border", "border-accent", "dark:border-dark-accent",
+      );
+      simulateHookUpButton.classList.add("bg-red-500", "hover:bg-red-600", "text-white", "border", "border-red-600");
+      simulateHookUpButton.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Playing greeting…';
+
+      // Poll every 500 ms until recording starts (or state resets to idle)
+      hookStatusPollInterval = setInterval(async () => {
+        try {
+          const res  = await fetch("/api/library-mode/hook-status");
+          const data = await res.json();
+          if (data.phase === "recording") {
+            setHookButtonState("recording");
+            if (typeof showToast === "function") showToast("Recording started.", "success");
+          } else if (!data.off_hook) {
+            setHookButtonState("idle");
+          }
+        } catch {
+          stopHookStatusPoll();
+        }
+      }, 500);
+
+    } else if (phase === "recording") {
+      simulateHookUpButton.dataset.hookState = "off_hook";
+      simulateHookUpButton.classList.remove(
+        "bg-primary", "hover:bg-accent",
+        "dark:bg-dark-primary", "dark:hover:bg-dark-accent",
+        "text-text", "dark:text-dark-text",
+        "border", "border-accent", "dark:border-dark-accent",
       );
       simulateHookUpButton.classList.add("bg-red-500", "hover:bg-red-600", "text-white", "border", "border-red-600");
       simulateHookUpButton.innerHTML = '<i class="fas fa-phone-slash mr-2"></i>Simulate Hook Down';
+
     } else {
+      // idle / on-hook
       simulateHookUpButton.dataset.hookState = "on_hook";
       simulateHookUpButton.classList.remove("bg-red-500", "hover:bg-red-600", "text-white", "border-red-600");
       simulateHookUpButton.classList.add(
-        "bg-primary",
-        "hover:bg-accent",
-        "dark:bg-dark-primary",
-        "dark:hover:bg-dark-accent",
-        "text-text",
-        "dark:text-dark-text",
-        "border",
-        "border-accent",
-        "dark:border-dark-accent",
+        "bg-primary", "hover:bg-accent",
+        "dark:bg-dark-primary", "dark:hover:bg-dark-accent",
+        "text-text", "dark:text-dark-text",
+        "border", "border-accent", "dark:border-dark-accent",
       );
       simulateHookUpButton.innerHTML = '<i class="fas fa-phone mr-2"></i>Simulate Hook Up';
     }
@@ -440,10 +472,10 @@ document.addEventListener("DOMContentLoaded", function () {
     try {
       const response = await fetch("/api/library-mode/hook-status");
       const data = await response.json();
-      setHookButtonState(Boolean(data.off_hook));
+      setHookButtonState(data.phase ?? (data.off_hook ? "recording" : "idle"));
     } catch (error) {
       console.error("Failed to read hook status:", error);
-      setHookButtonState(false);
+      setHookButtonState("idle");
     }
   }
 
@@ -467,9 +499,10 @@ document.addEventListener("DOMContentLoaded", function () {
         throw new Error(data.message || "Simulation failed.");
       }
 
-      setHookButtonState(Boolean(data.off_hook));
-      if (typeof showToast === "function") {
-        showToast(data.message || "Simulated hook-up finished.", "success");
+      const phase = data.phase ?? (data.off_hook ? "recording" : "idle");
+      setHookButtonState(phase);
+      if (phase !== "playing" && typeof showToast === "function") {
+        showToast(data.message || "Done.", "success");
       }
 
       // If hook-down stopped a recording, reload list so new file appears immediately.
