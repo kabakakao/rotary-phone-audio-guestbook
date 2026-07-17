@@ -102,6 +102,14 @@
             </div>
 
             <div class="mb-2">
+              <button type="button" id="open-greeting-recorder"
+                class="bg-amber-500 hover:bg-amber-600 text-white font-medium rounded-md px-3 py-2 flex items-center shadow-sm transition-colors duration-200">
+                <i class="fas fa-microphone mr-2"></i>Record Greeting
+              </button>
+              <span class="text-xs text-gray-500 dark:text-gray-400 mt-1 block">Open recorder overlay to capture, retry, and apply a new greeting.</span>
+            </div>
+
+            <div class="mb-2">
               <label for="greeting_volume" class="block mb-1">Volume</label>
               <input type="number" step="0.1" id="greeting_volume" name="greeting_volume"
                 value="{{ config['greeting_volume'] }}"
@@ -392,6 +400,44 @@
   </div>
 </form>
 
+<div id="greeting-recorder-overlay" class="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center hidden">
+  <div class="bg-white dark:bg-dark-secondary rounded-lg shadow-xl max-w-lg w-full mx-4 p-6">
+    <h3 class="text-lg font-bold mb-2">Record Greeting</h3>
+    <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">Use start/stop to record, then choose Use Recording to replace the current greeting.</p>
+
+    <div id="greeting-recorder-status" class="text-sm mb-4 text-gray-700 dark:text-gray-200">Ready.</div>
+
+    <div class="mb-4">
+      <label class="block mb-1 text-sm font-medium">Preview</label>
+      <audio id="greeting-record-preview-audio" controls preload="none" class="w-full"></audio>
+      <button type="button" id="greeting-record-preview-play" class="mt-2 bg-violet-500 hover:bg-violet-600 text-white font-medium rounded-md px-3 py-2">
+        <i class="fas fa-play mr-2"></i>Play Preview
+      </button>
+      <span class="text-xs text-gray-500 dark:text-gray-400 mt-1 block">Available after you stop recording.</span>
+    </div>
+
+    <div class="flex flex-wrap gap-2 mb-4">
+      <button type="button" id="greeting-record-start" class="bg-emerald-500 hover:bg-emerald-600 text-white font-medium rounded-md px-3 py-2">
+        <i class="fas fa-circle mr-2"></i>Start
+      </button>
+      <button type="button" id="greeting-record-stop" class="bg-orange-500 hover:bg-orange-600 text-white font-medium rounded-md px-3 py-2">
+        <i class="fas fa-stop mr-2"></i>Stop
+      </button>
+      <button type="button" id="greeting-record-rerecord" class="bg-sky-500 hover:bg-sky-600 text-white font-medium rounded-md px-3 py-2">
+        <i class="fas fa-rotate-right mr-2"></i>Record Again
+      </button>
+      <button type="button" id="greeting-record-use" class="bg-indigo-500 hover:bg-indigo-600 text-white font-medium rounded-md px-3 py-2">
+        <i class="fas fa-check mr-2"></i>Use Recording
+      </button>
+      <button type="button" id="greeting-record-close" class="bg-gray-500 hover:bg-gray-600 text-white font-medium rounded-md px-3 py-2">
+        <i class="fas fa-times mr-2"></i>Close
+      </button>
+    </div>
+
+    <p class="text-xs text-gray-500 dark:text-gray-400">Tip: after Use Recording, click Save Configuration to persist all other setting changes you may have made on this page.</p>
+  </div>
+</div>
+
 {% endblock %} {% block extra_js %}
 <script>
   // File upload feedback
@@ -469,6 +515,156 @@
       speakerTestBtn.disabled = false;
       speakerTestBtn.classList.remove("opacity-60", "cursor-not-allowed");
       speakerTestBtnLabel.textContent = "Play Test Sound";
+    }
+  });
+
+  // Greeting recorder overlay
+  const greetingRecorderOverlay = document.getElementById("greeting-recorder-overlay");
+  const greetingRecorderStatus = document.getElementById("greeting-recorder-status");
+  const openGreetingRecorderBtn = document.getElementById("open-greeting-recorder");
+  const greetingRecordStartBtn = document.getElementById("greeting-record-start");
+  const greetingRecordStopBtn = document.getElementById("greeting-record-stop");
+  const greetingRecordRerecordBtn = document.getElementById("greeting-record-rerecord");
+  const greetingRecordUseBtn = document.getElementById("greeting-record-use");
+  const greetingRecordCloseBtn = document.getElementById("greeting-record-close");
+  const greetingRecordPreviewAudio = document.getElementById("greeting-record-preview-audio");
+  const greetingRecordPreviewPlayBtn = document.getElementById("greeting-record-preview-play");
+
+  function setGreetingRecorderBusy(isBusy) {
+    [
+      greetingRecordStartBtn,
+      greetingRecordStopBtn,
+      greetingRecordRerecordBtn,
+      greetingRecordUseBtn,
+      greetingRecordCloseBtn,
+      greetingRecordPreviewPlayBtn,
+    ].forEach((btn) => {
+      if (!btn) return;
+      btn.disabled = isBusy;
+      btn.classList.toggle("opacity-60", isBusy);
+      btn.classList.toggle("cursor-not-allowed", isBusy);
+    });
+  }
+
+  function applyGreetingRecorderState(state) {
+    const recording = Boolean(state?.recording);
+    const hasRecording = Boolean(state?.has_recording);
+    const elapsed = state?.elapsed_seconds || 0;
+    const tempName = state?.temp_filename || "";
+
+    if (recording) {
+      greetingRecorderStatus.textContent = `Recording... ${elapsed}s`;
+    } else if (hasRecording) {
+      greetingRecorderStatus.textContent = `Recorded: ${tempName || "temporary greeting"}. You can use it or record again.`;
+    } else {
+      greetingRecorderStatus.textContent = "Ready.";
+    }
+
+    greetingRecordStartBtn.disabled = recording;
+    greetingRecordStopBtn.disabled = !recording;
+    greetingRecordUseBtn.disabled = !hasRecording || recording;
+
+    if (greetingRecordPreviewPlayBtn) {
+      greetingRecordPreviewPlayBtn.disabled = !hasRecording || recording;
+    }
+    if (greetingRecordPreviewAudio) {
+      if (hasRecording && !recording) {
+        greetingRecordPreviewAudio.src = `/api/greeting-record/preview?t=${Date.now()}`;
+        greetingRecordPreviewAudio.load();
+      } else {
+        greetingRecordPreviewAudio.removeAttribute("src");
+        greetingRecordPreviewAudio.load();
+      }
+    }
+  }
+
+  async function fetchGreetingRecorderState() {
+    try {
+      const response = await fetch("/api/greeting-record/status");
+      const data = await response.json();
+      if (response.ok && data.success) {
+        applyGreetingRecorderState(data);
+      }
+    } catch (err) {
+      greetingRecorderStatus.textContent = `Status error: ${err.message}`;
+    }
+  }
+
+  async function callGreetingRecorderApi(endpoint, fallbackMessage) {
+    setGreetingRecorderBusy(true);
+    try {
+      const response = await fetch(endpoint, { method: "POST" });
+      const data = await response.json();
+      applyGreetingRecorderState(data);
+      if (!response.ok || !data.success) {
+        throw new Error(data.message || fallbackMessage);
+      }
+      if (typeof showToast === "function") {
+        showToast(data.message || fallbackMessage, "success");
+      }
+      return true;
+    } catch (err) {
+      if (typeof showToast === "function") {
+        showToast(`Greeting recorder: ${err.message}`, "error");
+      }
+      greetingRecorderStatus.textContent = `Error: ${err.message}`;
+      return false;
+    } finally {
+      setGreetingRecorderBusy(false);
+      fetchGreetingRecorderState();
+    }
+  }
+
+  openGreetingRecorderBtn?.addEventListener("click", async () => {
+    greetingRecorderOverlay.classList.remove("hidden");
+    await fetchGreetingRecorderState();
+  });
+
+  greetingRecordStartBtn?.addEventListener("click", async () => {
+    await callGreetingRecorderApi("/api/greeting-record/start", "Greeting recording started.");
+  });
+
+  greetingRecordStopBtn?.addEventListener("click", async () => {
+    await callGreetingRecorderApi("/api/greeting-record/stop", "Greeting recording stopped.");
+  });
+
+  greetingRecordRerecordBtn?.addEventListener("click", async () => {
+    const discarded = await callGreetingRecorderApi("/api/greeting-record/discard", "Previous recording discarded.");
+    if (!discarded) return;
+    await callGreetingRecorderApi("/api/greeting-record/start", "Greeting recording started.");
+  });
+
+  greetingRecordUseBtn?.addEventListener("click", async () => {
+    const applied = await callGreetingRecorderApi("/api/greeting-record/use", "New greeting applied.");
+    if (!applied) return;
+    const currentGreetingLabel = document.querySelector("#greeting_file")
+      ?.closest("div")
+      ?.querySelector(".text-xs");
+    if (currentGreetingLabel) {
+      currentGreetingLabel.textContent = "Applied via recorder overlay";
+    }
+  });
+
+  greetingRecordCloseBtn?.addEventListener("click", () => {
+    greetingRecorderOverlay.classList.add("hidden");
+  });
+
+  greetingRecordPreviewPlayBtn?.addEventListener("click", async () => {
+    try {
+      if (!greetingRecordPreviewAudio?.src) {
+        await fetchGreetingRecorderState();
+      }
+      await greetingRecordPreviewAudio?.play();
+    } catch (err) {
+      if (typeof showToast === "function") {
+        showToast(`Preview playback failed: ${err.message}`, "error");
+      }
+    }
+  });
+
+  greetingRecorderOverlay?.addEventListener("click", (e) => {
+    if (e.target === greetingRecorderOverlay) {
+      greetingRecorderOverlay.classList.add("hidden");
     }
   });
 </script>

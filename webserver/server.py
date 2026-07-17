@@ -9,6 +9,7 @@ import tempfile
 import time
 import wave
 import zipfile
+import shutil
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -105,6 +106,11 @@ FFMPEG_FILE_TYPES = {"mp3", "ogg"}
 library_recording_proc = None
 library_recording_file = None
 library_recording_started_at = None
+
+# Greeting recording overlay runtime state (webserver process only).
+greeting_record_proc = None
+greeting_record_temp_file = None
+greeting_record_started_at = None
 
 def normalize_path(path):
     """Normalize and convert paths to Unix format."""
@@ -641,6 +647,195 @@ def _library_hook_state_payload():
         "filename": None,
         "elapsed_seconds": 0,
     }
+
+
+def _greeting_record_state_payload():
+    """Return current greeting-record overlay state."""
+    global greeting_record_proc, greeting_record_temp_file, greeting_record_started_at
+
+    if greeting_record_proc and greeting_record_proc.poll() is not None:
+        greeting_record_proc = None
+        greeting_record_started_at = None
+
+    temp_exists = bool(greeting_record_temp_file and Path(greeting_record_temp_file).exists())
+    elapsed = 0
+    if greeting_record_proc and greeting_record_started_at:
+        elapsed = max(0, int(time.time() - greeting_record_started_at))
+
+    return {
+        "recording": bool(greeting_record_proc and greeting_record_proc.poll() is None),
+        "has_recording": temp_exists,
+        "temp_filename": Path(greeting_record_temp_file).name if temp_exists else None,
+        "elapsed_seconds": elapsed,
+    }
+
+
+@app.route("/api/greeting-record/status", methods=["GET"])
+def greeting_record_status():
+    """Return current greeting-record session state."""
+    return jsonify({"success": True, **_greeting_record_state_payload()})
+
+
+@app.route("/api/greeting-record/preview", methods=["GET"])
+def greeting_record_preview():
+    """Serve the temporary recorded greeting for in-overlay playback preview."""
+    state = _greeting_record_state_payload()
+    if not state["has_recording"] or not greeting_record_temp_file:
+        return jsonify({"success": False, "message": "No recorded greeting available for preview."}), 404
+
+    temp_path = Path(greeting_record_temp_file)
+    mimetype = {
+        ".wav": "audio/wav",
+        ".mp3": "audio/mpeg",
+        ".ogg": "audio/ogg",
+    }.get(temp_path.suffix.lower(), "audio/wav")
+
+    return send_file(str(temp_path), mimetype=mimetype)
+
+
+@app.route("/api/greeting-record/start", methods=["POST"])
+def greeting_record_start():
+    """Start recording a temporary greeting file for later apply/discard."""
+    global greeting_record_proc, greeting_record_temp_file, greeting_record_started_at
+
+    if greeting_record_proc and greeting_record_proc.poll() is None:
+        return jsonify({
+            "success": False,
+            "message": "Greeting recording already in progress.",
+            **_greeting_record_state_payload(),
+        }), 409
+
+    current_config = load_config()
+    target_greeting = _resolve_config_audio_path(current_config.get("greeting", "sounds/greeting.wav"))
+    ext = target_greeting.suffix.lower().lstrip(".") or "wav"
+
+    tmp_dir = upload_folder / ".greeting-temp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    temp_path = tmp_dir / f"greeting_temp.{ext}"
+
+    if temp_path.exists():
+        temp_path.unlink()
+
+    capture_control = str(current_config.get("capture_mixer_control_name", "Capture"))
+    capture_volume = _clamp_float(current_config.get("capture_volume", 1.0), 1.0, 0.0, 1.0)
+    _set_amixer_percent(capture_control, int(capture_volume * 100), capture=True)
+
+    cmd, requires_ffmpeg, cmd_ext = _build_record_command(temp_path, current_config)
+    try:
+        greeting_record_proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except FileNotFoundError:
+        if requires_ffmpeg and cmd_ext not in FFMPEG_FILE_TYPES:
+            fallback_cmd = [
+                "arecord", "-q",
+                "-f", str(current_config.get("format", "cd")),
+                "-t", cmd_ext if cmd_ext in NATIVE_FILE_TYPES else "wav",
+                "-D", str(current_config.get("alsa_hw_mapping", "default")),
+                "-r", str(int(current_config.get("sample_rate") or 44100)),
+                "-c", str(int(current_config.get("channels") or 1)),
+                str(temp_path),
+            ]
+            try:
+                greeting_record_proc = subprocess.Popen(
+                    fallback_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+            except FileNotFoundError:
+                return jsonify({"success": False, "message": "Recording tools not found (arecord/ffmpeg)."}), 500
+        else:
+            return jsonify({"success": False, "message": "Recording tool not found. Install ffmpeg for this setup."}), 500
+
+    greeting_record_temp_file = str(temp_path)
+    greeting_record_started_at = time.time()
+
+    return jsonify({
+        "success": True,
+        "message": "Greeting recording started.",
+        **_greeting_record_state_payload(),
+    })
+
+
+@app.route("/api/greeting-record/stop", methods=["POST"])
+def greeting_record_stop():
+    """Stop active greeting recording and keep temp file for apply/discard."""
+    global greeting_record_proc, greeting_record_started_at
+
+    if not greeting_record_proc or greeting_record_proc.poll() is not None:
+        greeting_record_proc = None
+        greeting_record_started_at = None
+        state = _greeting_record_state_payload()
+        if state["has_recording"]:
+            return jsonify({"success": True, "message": "Recording already stopped.", **state})
+        return jsonify({"success": False, "message": "No active greeting recording.", **state}), 400
+
+    greeting_record_proc.terminate()
+    try:
+        greeting_record_proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        greeting_record_proc.kill()
+
+    greeting_record_proc = None
+    greeting_record_started_at = None
+
+    state = _greeting_record_state_payload()
+    if not state["has_recording"]:
+        return jsonify({"success": False, "message": "Recording stopped but no temp file was created.", **state}), 500
+
+    return jsonify({"success": True, "message": "Greeting recording stopped.", **state})
+
+
+@app.route("/api/greeting-record/use", methods=["POST"])
+def greeting_record_use():
+    """Apply the recorded temp greeting by replacing configured greeting file."""
+    global greeting_record_temp_file
+
+    if greeting_record_proc and greeting_record_proc.poll() is None:
+        return jsonify({"success": False, "message": "Stop recording before using it.", **_greeting_record_state_payload()}), 409
+
+    if not greeting_record_temp_file or not Path(greeting_record_temp_file).exists():
+        return jsonify({"success": False, "message": "No recorded greeting available to use.", **_greeting_record_state_payload()}), 400
+
+    current_config = load_config()
+    target_greeting = _resolve_config_audio_path(current_config.get("greeting", "sounds/greeting.wav"))
+    target_greeting.parent.mkdir(parents=True, exist_ok=True)
+
+    temp_path = Path(greeting_record_temp_file)
+    try:
+        if target_greeting.exists():
+            target_greeting.unlink()
+        shutil.move(str(temp_path), str(target_greeting))
+    except Exception as e:
+        logger.error(f"Failed applying recorded greeting: {e}")
+        return jsonify({"success": False, "message": f"Could not apply greeting: {e}"}), 500
+
+    greeting_record_temp_file = None
+    return jsonify({
+        "success": True,
+        "message": f"New greeting applied: {target_greeting.name}",
+        **_greeting_record_state_payload(),
+    })
+
+
+@app.route("/api/greeting-record/discard", methods=["POST"])
+def greeting_record_discard():
+    """Discard active/temporary greeting recording from overlay workflow."""
+    global greeting_record_proc, greeting_record_temp_file, greeting_record_started_at
+
+    if greeting_record_proc and greeting_record_proc.poll() is None:
+        greeting_record_proc.terminate()
+        try:
+            greeting_record_proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            greeting_record_proc.kill()
+
+    greeting_record_proc = None
+    greeting_record_started_at = None
+
+    if greeting_record_temp_file:
+        temp_path = Path(greeting_record_temp_file)
+        if temp_path.exists():
+            temp_path.unlink()
+    greeting_record_temp_file = None
+
+    return jsonify({"success": True, "message": "Temporary greeting recording discarded.", **_greeting_record_state_payload()})
 
 
 @app.route("/api/audio-test/mic-level", methods=["POST"])
