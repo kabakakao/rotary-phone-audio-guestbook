@@ -517,15 +517,28 @@ def _clamp_float(value, default, minimum, maximum):
     return max(minimum, min(parsed, maximum))
 
 
+def _set_amixer_percent(mixer_control, percent, capture=False):
+    """Best-effort mixer level update for playback or capture controls."""
+    level = max(0, min(int(percent), 100))
+    cmd = ["amixer", "set", mixer_control, f"{level}%"]
+    if capture:
+        subprocess.run(cmd + ["cap"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 @app.route("/api/audio-test/mic-level", methods=["POST"])
 def test_mic_level():
     """Record a short mic sample using the current input settings and return its signal level."""
     current_config = load_config()
     hw_mapping = str(current_config.get("alsa_hw_mapping", "default"))
+    capture_mixer_control = str(current_config.get("capture_mixer_control_name", "Capture"))
+    capture_volume = _clamp_float(current_config.get("capture_volume", 1.0), 1.0, 0.0, 1.0)
     channels = int(current_config.get("channels") or 1)
     sample_rate = int(current_config.get("sample_rate") or 44100)
     mic_test_gain = _clamp_float(current_config.get("mic_test_gain", 1.0), 1.0, 0.1, 10.0)
     duration = 2
+
+    _set_amixer_percent(capture_mixer_control, int(capture_volume * 100), capture=True)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir) / "mic_test.wav"
@@ -585,6 +598,7 @@ def test_play_sample():
     hw_mapping = str(current_config.get("alsa_hw_mapping", "default"))
     mixer_control = str(current_config.get("mixer_control_name", "Speaker"))
     speaker_test_volume = _clamp_float(current_config.get("speaker_test_volume", 1.0), 1.0, 0.0, 1.0)
+    speaker_test_gain = _clamp_float(current_config.get("speaker_test_gain", 1.0), 1.0, 0.1, 4.0)
     speaker_test_percent = int(speaker_test_volume * 100)
     sample_file = BASE_DIR / "sounds" / "beep.wav"
 
@@ -596,24 +610,50 @@ def test_play_sample():
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
 
-    try:
-        result = subprocess.run(
-            ["aplay", "-q", "-D", hw_mapping, str(sample_file)],
-            capture_output=True, timeout=10, env=_c_locale_env(),
-        )
-    except FileNotFoundError:
-        return jsonify({"success": False, "message": "'aplay' not found. Is ALSA installed?"}), 500
-    except subprocess.TimeoutExpired:
-        return jsonify({"success": False, "message": "Playback timed out."}), 500
+    if abs(speaker_test_gain - 1.0) > 1e-6:
+        # Software gain for the test tone; useful when hardware output is still too quiet at 100%.
+        ffmpeg_cmd = [
+            "ffmpeg", "-nostdin", "-loglevel", "error",
+            "-i", str(sample_file),
+            "-filter:a", f"volume={speaker_test_gain}",
+            "-f", "alsa", hw_mapping,
+        ]
+        try:
+            result = subprocess.run(
+                ffmpeg_cmd,
+                capture_output=True, timeout=12, env=_c_locale_env(),
+            )
+        except FileNotFoundError:
+            return jsonify({
+                "success": False,
+                "message": "Software gain requires ffmpeg. Install it with 'sudo apt install ffmpeg' or set speaker_test_gain back to 1.0.",
+            }), 500
+        except subprocess.TimeoutExpired:
+            return jsonify({"success": False, "message": "Playback timed out."}), 500
 
-    if result.returncode != 0:
-        stderr = result.stderr.decode(errors="ignore").strip()
-        logger.error(f"aplay failed: {stderr}")
-        return jsonify({"success": False, "message": _friendly_alsa_error(stderr, hw_mapping, is_playback=True)}), 500
+        if result.returncode != 0:
+            stderr = result.stderr.decode(errors="ignore").strip()
+            logger.error(f"ffmpeg playback failed: {stderr}")
+            return jsonify({"success": False, "message": _friendly_alsa_error(stderr, hw_mapping, is_playback=True)}), 500
+    else:
+        try:
+            result = subprocess.run(
+                ["aplay", "-q", "-D", hw_mapping, str(sample_file)],
+                capture_output=True, timeout=10, env=_c_locale_env(),
+            )
+        except FileNotFoundError:
+            return jsonify({"success": False, "message": "'aplay' not found. Is ALSA installed?"}), 500
+        except subprocess.TimeoutExpired:
+            return jsonify({"success": False, "message": "Playback timed out."}), 500
+
+        if result.returncode != 0:
+            stderr = result.stderr.decode(errors="ignore").strip()
+            logger.error(f"aplay failed: {stderr}")
+            return jsonify({"success": False, "message": _friendly_alsa_error(stderr, hw_mapping, is_playback=True)}), 500
 
     return jsonify({
         "success": True,
-        "message": f"Playback finished ({speaker_test_percent}% on '{mixer_control}').",
+        "message": f"Playback finished ({speaker_test_percent}% on '{mixer_control}', gain x{speaker_test_gain}).",
     })
 
 

@@ -30,10 +30,28 @@ recording_proc = None
 recording_start_ts = None
 record_greeting_proc = None
 
+
+def _clamp_float(value, default, minimum, maximum):
+    """Parse a float-like value and clamp it to a safe range."""
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(parsed, maximum))
+
 def set_volume(volume_pct, mixer_control):
     """Set system volume using amixer."""
     vol = max(0, min(int(volume_pct * 100), 100))
     subprocess.run(["amixer", "set", mixer_control, f"{vol}%"], check=False, 
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def set_capture_volume(volume_pct, mixer_control):
+    """Set capture/input level using amixer; tolerate card-specific control quirks."""
+    vol = max(0, min(int(volume_pct * 100), 100))
+    subprocess.run(["amixer", "set", mixer_control, f"{vol}%", "cap"], check=False,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["amixer", "set", mixer_control, f"{vol}%"], check=False,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 def is_on_hook(pin, hook_type, invert_hook):
@@ -75,7 +93,7 @@ NATIVE_FILE_TYPES = {"wav", "raw", "au", "voc"}
 FFMPEG_FILE_TYPES = {"mp3", "ogg"}
 
 
-def play_audio_interruptible(file_path, pin_hook, hw_mapping, volume, mixer_control, hook_type, invert_hook):
+def play_audio_interruptible(file_path, pin_hook, hw_mapping, volume, mixer_control, hook_type, invert_hook, playback_gain=1.0):
     """
     Play an audio file (wav via aplay, or mp3/ogg via ffmpeg), checking GPIO during playback.
     Returns True if played to completion, False if interrupted by on-hook.
@@ -86,10 +104,14 @@ def play_audio_interruptible(file_path, pin_hook, hw_mapping, volume, mixer_cont
     
     logger.info(f"Playing: {Path(file_path).name}")
     set_volume(volume, mixer_control)
+    playback_gain = _clamp_float(playback_gain, 1.0, 0.1, 4.0)
     
     ext = Path(file_path).suffix.lower().lstrip('.')
-    if ext in FFMPEG_FILE_TYPES:
-        cmd = ["ffmpeg", "-nostdin", "-loglevel", "error", "-i", str(file_path), "-f", "alsa", hw_mapping]
+    if ext in FFMPEG_FILE_TYPES or abs(playback_gain - 1.0) > 1e-6:
+        cmd = ["ffmpeg", "-nostdin", "-loglevel", "error", "-i", str(file_path)]
+        if abs(playback_gain - 1.0) > 1e-6:
+            cmd.extend(["-filter:a", f"volume={playback_gain}"])
+        cmd.extend(["-f", "alsa", hw_mapping])
     else:
         cmd = ["aplay", "-q", "-D", hw_mapping, str(file_path)]
     
@@ -123,16 +145,20 @@ def record_audio(out_file, config):
     formats (wav/raw/au/voc) and ffmpeg for mp3/ogg, chosen by out_file's extension.
     """
     ext = Path(out_file).suffix.lower().lstrip('.')
+    recording_gain = _clamp_float(config.get('recording_gain', 1.0), 1.0, 0.1, 4.0)
+    requires_ffmpeg = ext in FFMPEG_FILE_TYPES or abs(recording_gain - 1.0) > 1e-6
     
-    if ext in FFMPEG_FILE_TYPES:
+    if requires_ffmpeg:
         cmd = [
             "ffmpeg", "-y", "-loglevel", "error",
             "-f", "alsa",
             "-ar", str(config['sample_rate']),
             "-ac", str(config['channels']),
             "-i", config['alsa_hw_mapping'],
-            str(out_file)
         ]
+        if abs(recording_gain - 1.0) > 1e-6:
+            cmd.extend(["-filter:a", f"volume={recording_gain}"])
+        cmd.append(str(out_file))
     else:
         arecord_type = ext if ext in NATIVE_FILE_TYPES else "wav"
         cmd = [
@@ -148,6 +174,23 @@ def record_audio(out_file, config):
     try:
         return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except FileNotFoundError:
+        if requires_ffmpeg and ext not in FFMPEG_FILE_TYPES:
+            logger.warning("'ffmpeg' not found, falling back to arecord without recording_gain boost.")
+            arecord_type = ext if ext in NATIVE_FILE_TYPES else "wav"
+            fallback_cmd = [
+                "arecord", "-q",
+                "-f", config['format'],
+                "-t", arecord_type,
+                "-D", config['alsa_hw_mapping'],
+                "-r", str(config['sample_rate']),
+                "-c", str(config['channels']),
+                str(out_file)
+            ]
+            try:
+                return subprocess.Popen(fallback_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except FileNotFoundError:
+                logger.error("'arecord' not found. Is ALSA installed?")
+                return None
         logger.error(f"'{cmd[0]}' not found. Install it to record .{ext} files (e.g. 'sudo apt install ffmpeg').")
         return None
 
@@ -160,6 +203,10 @@ def start_recording(config):
     ext = config.get('file_type', 'wav')
     out_file = recordings_path / f"{timestamp}.{ext}"
     logger.info(f"Recording to: {out_file.name}")
+
+    capture_control = config.get('capture_mixer_control_name', 'Capture')
+    capture_volume = _clamp_float(config.get('capture_volume', 1.0), 1.0, 0.0, 1.0)
+    set_capture_volume(capture_volume, capture_control)
     
     return record_audio(out_file, config)
 
@@ -169,6 +216,10 @@ def start_recording_greeting(config):
     greeting_path.parent.mkdir(exist_ok=True)
     
     logger.info(f"Recording greeting to: {greeting_path.name}")
+
+    capture_control = config.get('capture_mixer_control_name', 'Capture')
+    capture_volume = _clamp_float(config.get('capture_volume', 1.0), 1.0, 0.0, 1.0)
+    set_capture_volume(capture_volume, capture_control)
     
     return record_audio(greeting_path, config)
 
@@ -292,7 +343,8 @@ def main():
                     config['greeting_volume'],
                     config['mixer_control_name'],
                     hook_type,
-                    invert_hook
+                    invert_hook,
+                    config.get('playback_gain', 1.0)
                 ):
                     prev_was_on_hook = is_on_hook(config['hook_gpio'], hook_type, invert_hook)
                     continue
@@ -310,7 +362,8 @@ def main():
                     config['beep_volume'],
                     config['mixer_control_name'],
                     hook_type,
-                    invert_hook
+                    invert_hook,
+                    config.get('playback_gain', 1.0)
                 ):
                     prev_was_on_hook = is_on_hook(config['hook_gpio'], hook_type, invert_hook)
                     continue
@@ -345,7 +398,8 @@ def main():
                         config['time_exceeded_volume'],
                         config['mixer_control_name'],
                         hook_type,
-                        invert_hook
+                        invert_hook,
+                        config.get('playback_gain', 1.0)
                     )
             
             prev_was_on_hook = currently_on_hook
@@ -394,7 +448,8 @@ def main():
                         config['beep_volume'],
                         config['mixer_control_name'],
                         config.get('record_greeting_type', 'NC'),
-                        False  # No invert for record greeting
+                        False,  # No invert for record greeting
+                        config.get('playback_gain', 1.0)
                     )
                     
                     # Start recording greeting

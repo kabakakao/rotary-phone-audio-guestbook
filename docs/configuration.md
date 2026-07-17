@@ -42,10 +42,14 @@ In `config.yaml`, you can customize audio format settings:
 
 - `alsa_hw_mapping`: The ALSA hardware mapping for your audio interface (e.g., "plughw:1,0")
 - `mixer_control_name`: The mixer control name to use for volume adjustment (e.g., "Speaker")
+- `capture_mixer_control_name`: The mixer control name for input level (e.g., `Capture`, `Mic`)
 - `format`: Audio format to use (default is "cd" - see `aplay --help` for other options)
 - `file_type`: Output file format for guest recordings - `wav` (default), `mp3` or `ogg`. Playback of greeting/beep/time_exceeded files also supports these three types, detected from the uploaded file's extension. `mp3`/`ogg` require `ffmpeg` to be installed (`sudo apt install ffmpeg`); `wav` uses `arecord`/`aplay` only.
 - `channels`: Number of audio channels (2 for stereo, 1 for mono)
 - `sample_rate`: Recording sample rate in Hz (default is 44100)
+- `capture_volume`: Input level via `amixer` before mic tests and recordings (`0.0` to `1.0`)
+- `recording_gain`: Software gain for recorded files (`0.1` to `4.0`); values above `1.0` require `ffmpeg`
+- `playback_gain`: Software gain for greeting/beep/time_exceeded playback (`0.1` to `4.0`)
 
 ## GPIO Configuration
 
@@ -133,6 +137,7 @@ To record a custom greeting:
 ### Audio Test Tuning (Web UI)
 
 - `speaker_test_volume`: Output level used by the **Speaker (Output)** test button in the web UI (`0.0` to `1.0`)
+- `speaker_test_gain`: Software gain for the **Speaker (Output)** test tone (`0.1` to `4.0`); values above `1.0` require `ffmpeg`
 - `mic_test_gain`: Digital gain used by the **Microphone (Input)** test meter (`0.1` to `10.0`); this only affects the displayed test level, not real recordings
 
 ## Recording Settings

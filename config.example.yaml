@@ -10,9 +10,13 @@
 # such as plughw:CARD=<name>,DEV=0.
 alsa_hw_mapping: default
 mixer_control_name: Speaker # look at amixer scontrols for available controls
+capture_mixer_control_name: Capture # look at amixer scontrols for available capture controls
 format: cd # look at aplay --help for available formats
 file_type: wav # wav (default), mp3 or ogg. mp3/ogg require ffmpeg to be installed.
 channels: 2
+capture_volume: 1.0 # 0.0 - 1.0 input level via amixer before recording
+recording_gain: 1.0 # 0.1 - 4.0 software gain for recordings (ffmpeg required >1.0)
+playback_gain: 1.0 # 0.1 - 4.0 software gain for greeting/beep/time_exceeded playback
 hook_gpio: 22
 hook_type: NC # or 'NO' depending on your hardware configuration
 invert_hook: false # Set to true if your hook behavior is reversed (recording starts when handset is down instead of up)
@@ -38,6 +42,7 @@ time_exceeded: __INSTALL_DIR__/sounds/time_exceeded.wav
 time_exceeded_volume: 1.0
 # Audio test tuning (used by web UI test buttons)
 speaker_test_volume: 1.0 # 0.0 - 1.0 output level for speaker test
+speaker_test_gain: 1.0 # 0.1 - 4.0 software gain for speaker test tone (ffmpeg required >1.0)
 mic_test_gain: 1.0 # 0.1 - 10.0 digital gain for mic test meter only
 recordings_path: __INSTALL_DIR__/recordings
 shutdown_gpio: 0 #Set GPIO pin here --> Note: Pin is active LOW, pull Pin to GND to activate shutdown
