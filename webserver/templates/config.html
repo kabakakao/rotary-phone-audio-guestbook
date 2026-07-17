@@ -103,7 +103,7 @@
 
             <div class="mb-2">
               <button type="button" id="open-greeting-recorder"
-                class="bg-amber-500 hover:bg-amber-600 text-white font-medium rounded-md px-3 py-2 flex items-center shadow-sm transition-colors duration-200">
+                class="bg-primary hover:bg-accent dark:bg-dark-primary dark:hover:bg-dark-accent text-text dark:text-dark-text font-medium rounded-md px-3 py-2 flex items-center shadow-sm transition-colors duration-200 border border-accent dark:border-dark-accent">
                 <i class="fas fa-microphone mr-2"></i>Record Greeting
               </button>
               <span class="text-xs text-gray-500 dark:text-gray-400 mt-1 block">Open recorder overlay to capture, retry, and apply a new greeting.</span>
@@ -410,26 +410,26 @@
     <div class="mb-4">
       <label class="block mb-1 text-sm font-medium">Preview</label>
       <audio id="greeting-record-preview-audio" controls preload="none" class="w-full"></audio>
-      <button type="button" id="greeting-record-preview-play" class="mt-2 bg-violet-500 hover:bg-violet-600 text-white font-medium rounded-md px-3 py-2">
+      <button type="button" id="greeting-record-preview-play" class="mt-2 bg-primary hover:bg-accent dark:bg-dark-primary dark:hover:bg-dark-accent text-text dark:text-dark-text font-medium rounded-md px-3 py-2 border border-accent dark:border-dark-accent">
         <i class="fas fa-play mr-2"></i>Play Preview
       </button>
       <span class="text-xs text-gray-500 dark:text-gray-400 mt-1 block">Available after you stop recording.</span>
     </div>
 
     <div class="flex flex-wrap gap-2 mb-4">
-      <button type="button" id="greeting-record-start" class="bg-emerald-500 hover:bg-emerald-600 text-white font-medium rounded-md px-3 py-2">
+      <button type="button" id="greeting-record-start" class="bg-primary hover:bg-accent dark:bg-dark-primary dark:hover:bg-dark-accent text-text dark:text-dark-text font-medium rounded-md px-3 py-2 border border-accent dark:border-dark-accent">
         <i class="fas fa-circle mr-2"></i>Start
       </button>
-      <button type="button" id="greeting-record-stop" class="bg-orange-500 hover:bg-orange-600 text-white font-medium rounded-md px-3 py-2">
+      <button type="button" id="greeting-record-stop" class="bg-red-500 hover:bg-red-600 text-white font-medium rounded-md px-3 py-2 border border-red-600">
         <i class="fas fa-stop mr-2"></i>Stop
       </button>
-      <button type="button" id="greeting-record-rerecord" class="bg-sky-500 hover:bg-sky-600 text-white font-medium rounded-md px-3 py-2">
+      <button type="button" id="greeting-record-rerecord" class="bg-secondary hover:bg-accent dark:bg-dark-secondary dark:hover:bg-dark-accent text-text dark:text-dark-text font-medium rounded-md px-3 py-2 border border-accent dark:border-dark-accent">
         <i class="fas fa-rotate-right mr-2"></i>Record Again
       </button>
-      <button type="button" id="greeting-record-use" class="bg-indigo-500 hover:bg-indigo-600 text-white font-medium rounded-md px-3 py-2">
+      <button type="button" id="greeting-record-use" class="bg-primary hover:bg-accent dark:bg-dark-primary dark:hover:bg-dark-accent text-text dark:text-dark-text font-medium rounded-md px-3 py-2 border border-accent dark:border-dark-accent">
         <i class="fas fa-check mr-2"></i>Use Recording
       </button>
-      <button type="button" id="greeting-record-close" class="bg-gray-500 hover:bg-gray-600 text-white font-medium rounded-md px-3 py-2">
+      <button type="button" id="greeting-record-close" class="bg-secondary hover:bg-accent dark:bg-dark-secondary dark:hover:bg-dark-accent text-text dark:text-dark-text font-medium rounded-md px-3 py-2 border border-accent dark:border-dark-accent">
         <i class="fas fa-times mr-2"></i>Close
       </button>
     </div>
@@ -554,10 +554,15 @@
 
     if (recording) {
       greetingRecorderStatus.textContent = `Recording... ${elapsed}s`;
+      greetingRecorderStatus.classList.add("text-red-600", "dark:text-red-400", "font-semibold");
+      greetingRecorderStatus.classList.remove("text-green-600", "dark:text-green-400");
     } else if (hasRecording) {
       greetingRecorderStatus.textContent = `Recorded: ${tempName || "temporary greeting"}. You can use it or record again.`;
+      greetingRecorderStatus.classList.remove("text-red-600", "dark:text-red-400", "font-semibold");
+      greetingRecorderStatus.classList.add("text-green-600", "dark:text-green-400");
     } else {
       greetingRecorderStatus.textContent = "Ready.";
+      greetingRecorderStatus.classList.remove("text-red-600", "dark:text-red-400", "font-semibold", "text-green-600", "dark:text-green-400");
     }
 
     greetingRecordStartBtn.disabled = recording;

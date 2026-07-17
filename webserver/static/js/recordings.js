@@ -404,13 +404,33 @@ document.addEventListener("DOMContentLoaded", function () {
     if (!simulateHookUpButton) return;
     if (isOffHook) {
       simulateHookUpButton.dataset.hookState = "off_hook";
-      simulateHookUpButton.classList.remove("bg-amber-500", "hover:bg-amber-600");
-      simulateHookUpButton.classList.add("bg-rose-500", "hover:bg-rose-600");
+      simulateHookUpButton.classList.remove(
+        "bg-primary",
+        "hover:bg-accent",
+        "dark:bg-dark-primary",
+        "dark:hover:bg-dark-accent",
+        "text-text",
+        "dark:text-dark-text",
+        "border",
+        "border-accent",
+        "dark:border-dark-accent",
+      );
+      simulateHookUpButton.classList.add("bg-red-500", "hover:bg-red-600", "text-white", "border", "border-red-600");
       simulateHookUpButton.innerHTML = '<i class="fas fa-phone-slash mr-2"></i>Simulate Hook Down';
     } else {
       simulateHookUpButton.dataset.hookState = "on_hook";
-      simulateHookUpButton.classList.remove("bg-rose-500", "hover:bg-rose-600");
-      simulateHookUpButton.classList.add("bg-amber-500", "hover:bg-amber-600");
+      simulateHookUpButton.classList.remove("bg-red-500", "hover:bg-red-600", "text-white", "border-red-600");
+      simulateHookUpButton.classList.add(
+        "bg-primary",
+        "hover:bg-accent",
+        "dark:bg-dark-primary",
+        "dark:hover:bg-dark-accent",
+        "text-text",
+        "dark:text-dark-text",
+        "border",
+        "border-accent",
+        "dark:border-dark-accent",
+      );
       simulateHookUpButton.innerHTML = '<i class="fas fa-phone mr-2"></i>Simulate Hook Up';
     }
   }
