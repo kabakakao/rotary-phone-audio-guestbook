@@ -178,6 +178,13 @@
           <h3 class="font-semibold mb-2 pb-1 border-b border-gray-200 dark:border-gray-700">
             Microphone (Input)
           </h3>
+          <div class="mb-2">
+            <label for="mic_test_gain" class="block mb-1">Mic Test Gain</label>
+            <input type="number" step="0.1" min="0.1" max="10" id="mic_test_gain" name="mic_test_gain"
+              value="{{ config.get('mic_test_gain', 1.0) }}"
+              class="w-full px-3 py-2 border rounded bg-background dark:bg-dark-input-background text-text-primary dark:text-dark-input-text" />
+            <span class="text-xs text-gray-500 dark:text-gray-400 mt-1">Only affects the mic test meter (0.1 - 10.0), not recording quality.</span>
+          </div>
           <p class="text-xs text-gray-500 dark:text-gray-400 mb-3">
             Records ~2 seconds with the settings above and shows the signal level. Speak into the mic while it
             records.
@@ -196,6 +203,13 @@
           <h3 class="font-semibold mb-2 pb-1 border-b border-gray-200 dark:border-gray-700">
             Speaker (Output)
           </h3>
+          <div class="mb-2">
+            <label for="speaker_test_volume" class="block mb-1">Speaker Test Volume</label>
+            <input type="number" step="0.1" min="0" max="1" id="speaker_test_volume" name="speaker_test_volume"
+              value="{{ config.get('speaker_test_volume', 1.0) }}"
+              class="w-full px-3 py-2 border rounded bg-background dark:bg-dark-input-background text-text-primary dark:text-dark-input-text" />
+            <span class="text-xs text-gray-500 dark:text-gray-400 mt-1">Used by the speaker test button (0.0 - 1.0).</span>
+          </div>
           <p class="text-xs text-gray-500 dark:text-gray-400 mb-3">
             Plays a short sample sound through the currently configured output device and volume.
           </p>
@@ -386,8 +400,8 @@
         micLevelBar.style.width = `${level}%`;
         micLevelBar.classList.add(level > 90 ? "bg-red-500" : level > 5 ? "bg-green-500" : "bg-yellow-500");
         micTestResult.textContent = level <= 5
-          ? `Peak ${level}% / RMS ${data.rms_percent}% — signal looks very quiet, check the microphone connection.`
-          : `Peak ${level}% / RMS ${data.rms_percent}%`;
+          ? `Peak ${level}% / RMS ${data.rms_percent}% (raw peak ${data.raw_peak_percent}%, gain x${data.mic_test_gain}) — signal looks very quiet, check the microphone connection.`
+          : `Peak ${level}% / RMS ${data.rms_percent}% (raw peak ${data.raw_peak_percent}%, gain x${data.mic_test_gain})`;
       } else {
         micLevelBar.classList.add("bg-red-500");
         micLevelBar.style.width = "100%";

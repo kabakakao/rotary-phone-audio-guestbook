@@ -508,6 +508,15 @@ def _friendly_alsa_error(stderr, hw_mapping, is_playback=False):
     return f"{action} failed: {stderr or 'unknown error'}"
 
 
+def _clamp_float(value, default, minimum, maximum):
+    """Parse numeric input and clamp it to a safe range."""
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(parsed, maximum))
+
+
 @app.route("/api/audio-test/mic-level", methods=["POST"])
 def test_mic_level():
     """Record a short mic sample using the current input settings and return its signal level."""
@@ -515,6 +524,7 @@ def test_mic_level():
     hw_mapping = str(current_config.get("alsa_hw_mapping", "default"))
     channels = int(current_config.get("channels") or 1)
     sample_rate = int(current_config.get("sample_rate") or 44100)
+    mic_test_gain = _clamp_float(current_config.get("mic_test_gain", 1.0), 1.0, 0.1, 10.0)
     duration = 2
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -555,11 +565,16 @@ def test_mic_level():
     peak = max(abs(s) for s in samples)
     rms = (sum(s * s for s in samples) / len(samples)) ** 0.5
     max_possible = 32767.0
+    boosted_peak = min(peak * mic_test_gain, max_possible)
+    boosted_rms = min(rms * mic_test_gain, max_possible)
 
     return jsonify({
         "success": True,
-        "peak_percent": round(min(peak / max_possible, 1.0) * 100, 1),
-        "rms_percent": round(min(rms / max_possible, 1.0) * 100, 1),
+        "peak_percent": round((boosted_peak / max_possible) * 100, 1),
+        "rms_percent": round((boosted_rms / max_possible) * 100, 1),
+        "raw_peak_percent": round(min(peak / max_possible, 1.0) * 100, 1),
+        "raw_rms_percent": round(min(rms / max_possible, 1.0) * 100, 1),
+        "mic_test_gain": mic_test_gain,
     })
 
 
@@ -569,13 +584,15 @@ def test_play_sample():
     current_config = load_config()
     hw_mapping = str(current_config.get("alsa_hw_mapping", "default"))
     mixer_control = str(current_config.get("mixer_control_name", "Speaker"))
+    speaker_test_volume = _clamp_float(current_config.get("speaker_test_volume", 1.0), 1.0, 0.0, 1.0)
+    speaker_test_percent = int(speaker_test_volume * 100)
     sample_file = BASE_DIR / "sounds" / "beep.wav"
 
     if not sample_file.exists():
         return jsonify({"success": False, "message": f"Sample file not found: {sample_file}"}), 404
 
     subprocess.run(
-        ["amixer", "set", mixer_control, "80%"], check=False,
+        ["amixer", "set", mixer_control, f"{speaker_test_percent}%"], check=False,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
 
@@ -594,7 +611,10 @@ def test_play_sample():
         logger.error(f"aplay failed: {stderr}")
         return jsonify({"success": False, "message": _friendly_alsa_error(stderr, hw_mapping, is_playback=True)}), 500
 
-    return jsonify({"success": True, "message": "Playback finished."})
+    return jsonify({
+        "success": True,
+        "message": f"Playback finished ({speaker_test_percent}% on '{mixer_control}').",
+    })
 
 
 @app.route("/delete-recordings", methods=["POST"])

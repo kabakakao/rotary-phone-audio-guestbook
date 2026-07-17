@@ -130,6 +130,11 @@ To record a custom greeting:
 - `time_exceeded`: Path to the time exceeded audio file
 - `time_exceeded_volume`: Volume level for the time exceeded message
 
+### Audio Test Tuning (Web UI)
+
+- `speaker_test_volume`: Output level used by the **Speaker (Output)** test button in the web UI (`0.0` to `1.0`)
+- `mic_test_gain`: Digital gain used by the **Microphone (Input)** test meter (`0.1` to `10.0`); this only affects the displayed test level, not real recordings
+
 ## Recording Settings
 
 - `recordings_path`: Directory where recordings will be saved

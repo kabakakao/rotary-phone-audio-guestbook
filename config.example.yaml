@@ -36,6 +36,9 @@ greeting_start_delay: 1.5
 # The time_exceeded sound is played when the user has been recording for too long
 time_exceeded: __INSTALL_DIR__/sounds/time_exceeded.wav
 time_exceeded_volume: 1.0
+# Audio test tuning (used by web UI test buttons)
+speaker_test_volume: 1.0 # 0.0 - 1.0 output level for speaker test
+mic_test_gain: 1.0 # 0.1 - 10.0 digital gain for mic test meter only
 recordings_path: __INSTALL_DIR__/recordings
 shutdown_gpio: 0 #Set GPIO pin here --> Note: Pin is active LOW, pull Pin to GND to activate shutdown
 shutdown_button_hold_time: 2 # default 2 seconds
