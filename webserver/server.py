@@ -1,5 +1,6 @@
 import io
 import logging
+import mimetypes
 import os
 import re
 import subprocess
@@ -42,6 +43,8 @@ app = Flask(__name__,
            static_url_path="/static",
            static_folder=str(STATIC_DIR))
 app.secret_key = "supersecretkey"  # Needed for flashing messages
+
+SUPPORTED_RECORDING_EXTENSIONS = {".wav", ".mp3", ".ogg"}
 
 # Define other important paths. The AGB_CONFIG_PATH / AGB_UPLOAD_FOLDER env
 # overrides let an off-device harness (test/test_server.py) point the app at an
@@ -141,8 +144,15 @@ def get_recordings():
             for item in all_items:
                 logger.info(f"  - {item.name} ({'file' if item.is_file() else 'dir'})")
 
-            files = [f.name for f in all_items if f.is_file()]
-            logger.info(f"Found {len(files)} files: {files}")
+            files = [
+                {
+                    "filename": f.name,
+                    "size_bytes": f.stat().st_size,
+                }
+                for f in all_items
+                if f.is_file()
+            ]
+            logger.info(f"Found {len(files)} files")
             return jsonify(files)
         else:
             logger.error(f"Recordings path is not a valid directory: {recordings_path}")
@@ -201,6 +211,9 @@ def edit_config():
 def serve_recording(filename):
     """Serve a specific recording with proper streaming and range support."""
     file_path = recordings_path / filename
+    mime_type, _ = mimetypes.guess_type(str(file_path))
+    if not mime_type:
+        mime_type = 'application/octet-stream'
 
     # Verify file exists
     if not file_path.exists():
@@ -233,7 +246,7 @@ def serve_recording(filename):
         resp = Response(
             generate_file_chunks(str(file_path), byte1, byte2),
             status=206,
-            mimetype='audio/wav',
+            mimetype=mime_type,
             direct_passthrough=True
         )
 
@@ -245,7 +258,7 @@ def serve_recording(filename):
     # If no range header, serve the whole file
     resp = Response(
         generate_file_chunks(str(file_path), 0, file_size - 1),
-        mimetype='audio/wav'
+        mimetype=mime_type
     )
     resp.headers.add('Accept-Ranges', 'bytes')
     resp.headers.add('Content-Length', str(file_size))
@@ -273,12 +286,15 @@ def download_all():
     """Download all recordings as a zip file."""
     memory_file = io.BytesIO()
     with zipfile.ZipFile(memory_file, "w") as zf:
-        wav_files = [f for f in recordings_path.iterdir() if f.is_file() and f.suffix.lower() == ".wav"]
+        recording_files = [
+            f for f in recordings_path.iterdir()
+            if f.is_file() and f.suffix.lower() in SUPPORTED_RECORDING_EXTENSIONS
+        ]
 
         # Log the files being added to the zip
-        logger.info(f"Adding {len(wav_files)} files to zip")
+        logger.info(f"Adding {len(recording_files)} files to zip")
 
-        for file_path in wav_files:
+        for file_path in recording_files:
             # Use absolute path for reading
             abs_path = str(file_path.absolute())
             logger.info(f"Adding file: {abs_path}")

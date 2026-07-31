@@ -28,7 +28,13 @@ def load_config(config_path):
 # Global state
 recording_proc = None
 recording_start_ts = None
+recording_capture_file = None
+recording_output_file = None
+recording_file_type = "wav"
 record_greeting_proc = None
+
+SUPPORTED_OUTPUT_FILE_TYPES = {"wav", "mp3", "ogg"}
+MISCONFIGURED_ARECORD_FORMATS = {"wav", "wave", "mp3", "ogg"}
 
 def set_volume(volume_pct, mixer_control):
     """Set system volume using amixer."""
@@ -105,37 +111,106 @@ def play_wav_interruptible(file_path, pin_hook, hw_mapping, volume, mixer_contro
     
     return True
 
+def resolve_arecord_sample_format(config):
+    """Return a safe arecord sample format and guard against common misconfiguration."""
+    sample_format = str(config.get('format', 'cd')).strip()
+    if sample_format.lower() in MISCONFIGURED_ARECORD_FORMATS:
+        logger.warning(
+            "Unsupported arecord sample format '%s'. Using 'cd' (PCM) instead.",
+            sample_format
+        )
+        return "cd"
+    return sample_format
+
+def resolve_output_file_type(config):
+    """Normalize and validate output type for guest recordings."""
+    output_type = str(config.get('file_type', 'wav')).strip().lower()
+    if output_type not in SUPPORTED_OUTPUT_FILE_TYPES:
+        logger.warning(
+            "Unsupported output file type '%s'. Falling back to 'wav'.",
+            output_type
+        )
+        return "wav"
+    return output_type
+
+def transcode_recording_if_needed(capture_file, output_file, output_type):
+    """Transcode recorded WAV to the configured format after recording has stopped."""
+    if output_type == "wav":
+        return
+
+    if not capture_file or not Path(capture_file).exists():
+        logger.error("Capture file missing, cannot transcode: %s", capture_file)
+        return
+
+    ffmpeg_args = {
+        "mp3": ["-codec:a", "libmp3lame", "-q:a", "2"],
+        "ogg": ["-codec:a", "libvorbis", "-q:a", "5"],
+    }
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(capture_file),
+        *ffmpeg_args[output_type],
+        str(output_file),
+    ]
+
+    logger.info("Transcoding recording to %s: %s", output_type, Path(output_file).name)
+    try:
+        subprocess.run(cmd, check=True)
+        Path(capture_file).unlink(missing_ok=True)
+    except FileNotFoundError:
+        logger.error("ffmpeg is not installed; keeping WAV recording: %s", capture_file)
+    except subprocess.CalledProcessError as e:
+        logger.error("Failed to transcode recording to %s: %s", output_type, e)
+
 def start_recording(config):
     """Start arecord process for guest recording."""
     timestamp = datetime.now().isoformat().replace(':','-')
     recordings_path = Path(config['recordings_path'])
-    recordings_path.mkdir(exist_ok=True)
-    
-    out_file = recordings_path / f"{timestamp}.wav"
-    logger.info(f"Recording to: {out_file.name}")
+    recordings_path.mkdir(parents=True, exist_ok=True)
+
+    output_type = resolve_output_file_type(config)
+    capture_file = recordings_path / f"{timestamp}.wav"
+    output_file = recordings_path / f"{timestamp}.{output_type}"
+    arecord_sample_format = resolve_arecord_sample_format(config)
+
+    if output_type == "wav":
+        logger.info(f"Recording to: {output_file.name}")
+    else:
+        logger.info(
+            "Recording to temporary WAV (%s), then converting to: %s",
+            capture_file.name,
+            output_file.name
+        )
     
     proc = subprocess.Popen([
         "arecord", "-q",
-        "-f", config['format'],
-        "-t", config['file_type'],
+        "-f", arecord_sample_format,
+        "-t", "wav",
         "-D", config['alsa_hw_mapping'],
         "-r", str(config['sample_rate']),
         "-c", str(config['channels']),
-        str(out_file)
+        str(capture_file)
     ])
-    return proc
+    return proc, capture_file, output_file, output_type
 
 def start_recording_greeting(config):
     """Start arecord process for recording greeting message."""
     greeting_path = Path(config['greeting'])
     greeting_path.parent.mkdir(exist_ok=True)
+    arecord_sample_format = resolve_arecord_sample_format(config)
     
     logger.info(f"Recording greeting to: {greeting_path.name}")
     
     proc = subprocess.Popen([
         "arecord", "-q",
-        "-f", config['format'],
-        "-t", config['file_type'],
+        "-f", arecord_sample_format,
+        "-t", "wav",
         "-D", config['alsa_hw_mapping'],
         "-r", str(config['sample_rate']),
         "-c", str(config['channels']),
@@ -172,7 +247,8 @@ def check_shutdown_button(pin_shutdown, hold_time=4.0):
     return False
 
 def main():
-    global recording_proc, recording_start_ts, record_greeting_proc
+    global recording_proc, recording_start_ts, recording_capture_file
+    global recording_output_file, recording_file_type, record_greeting_proc
     
     # Load configuration
     config_path = Path(__file__).parent / "../config.yaml"
@@ -288,7 +364,7 @@ def main():
                 
                 # Start recording if still off-hook
                 if not is_on_hook(config['hook_gpio'], hook_type, invert_hook) and recording_proc is None:
-                    recording_proc = start_recording(config)
+                    recording_proc, recording_capture_file, recording_output_file, recording_file_type = start_recording(config)
                     recording_start_ts = time.time()
             
             # ON-HOOK: User replaced handset
@@ -296,8 +372,12 @@ def main():
                 logger.info("[ON-HOOK] Handset replaced")
                 if recording_proc:
                     stop_recording(recording_proc)
+                    transcode_recording_if_needed(recording_capture_file, recording_output_file, recording_file_type)
                     recording_proc = None
                     recording_start_ts = None
+                    recording_capture_file = None
+                    recording_output_file = None
+                    recording_file_type = "wav"
             
             # Check max recording duration
             if recording_proc and recording_proc.poll() is None and recording_start_ts:
@@ -305,8 +385,12 @@ def main():
                 if elapsed >= config['recording_limit']:
                     logger.warning(f"[TIME EXCEEDED] Max recording time {config['recording_limit']}s reached")
                     stop_recording(recording_proc)
+                    transcode_recording_if_needed(recording_capture_file, recording_output_file, recording_file_type)
                     recording_proc = None
                     recording_start_ts = None
+                    recording_capture_file = None
+                    recording_output_file = None
+                    recording_file_type = "wav"
                     
                     # Play time exceeded message (interruptible)
                     play_wav_interruptible(
@@ -397,6 +481,7 @@ def main():
         logger.info("\n\nExiting...")
     finally:
         stop_recording(recording_proc)
+        transcode_recording_if_needed(recording_capture_file, recording_output_file, recording_file_type)
         stop_recording(record_greeting_proc, "greeting recording")
         GPIO.cleanup()
         logger.info("Cleanup complete. Goodbye!")

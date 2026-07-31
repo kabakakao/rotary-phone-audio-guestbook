@@ -27,7 +27,7 @@ function loadRecordings() {
         // Display empty state message
         const emptyRow = document.createElement("tr");
         emptyRow.innerHTML = `
-          <td colspan="5" class="py-8 text-center">
+          <td colspan="6" class="py-8 text-center">
             <div class="flex flex-col items-center">
               <i class="fas fa-microphone-slash text-4xl text-gray-300 dark:text-gray-600 mb-3"></i>
               <p class="text-gray-500 dark:text-gray-400">No recordings yet.</p>
@@ -46,10 +46,16 @@ function loadRecordings() {
         document.getElementById('delete-selected')?.classList.remove("hidden");
 
         // Add recording items
-        files.forEach((filename, index) => {
+        files.forEach((recording, index) => {
+          const filename = typeof recording === "string" ? recording : recording.filename;
+          const sizeBytes =
+            typeof recording === "string" || typeof recording.size_bytes !== "number"
+              ? null
+              : recording.size_bytes;
+
           console.log(`Creating item ${index + 1}/${files.length}: ${filename}`);
           try {
-            const item = createRecordingItem(filename);
+            const item = createRecordingItem(filename, sizeBytes);
             recordingList.appendChild(item);
           } catch (err) {
             console.error(`Error creating item for ${filename}:`, err);
@@ -112,7 +118,7 @@ function loadRecordings() {
         if (recordingList) {
           recordingList.innerHTML = `
             <tr>
-              <td colspan="5" class="p-4 text-center text-red-600">
+              <td colspan="6" class="p-4 text-center text-red-600">
                 <div class="flex flex-col items-center">
                   <i class="fas fa-exclamation-circle text-4xl mb-3"></i>
                   <p class="font-semibold">Error loading recordings</p>
@@ -127,6 +133,22 @@ function loadRecordings() {
         }
       }
     });
+}
+
+function formatBytes(bytes) {
+  if (typeof bytes !== "number" || Number.isNaN(bytes) || bytes < 0) {
+    return "-";
+  }
+  if (bytes === 0) {
+    return "0.00 B";
+  }
+
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const exponent = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const value = bytes / Math.pow(1024, exponent);
+  const rounded = value.toFixed(2);
+
+  return `${rounded} ${units[exponent]}`;
 }
 
 function improveAudioDurationDetection() {
@@ -162,7 +184,7 @@ function improveAudioDurationDetection() {
   });
 }
 
-function createRecordingItem(filename) {
+function createRecordingItem(filename, sizeBytes) {
   const row = document.createElement("tr");
   row.className =
     "recording-item border-b border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors duration-200";
@@ -192,6 +214,7 @@ function createRecordingItem(filename) {
         <audio class="audio-player" src="/recordings/${filename}"></audio>
       </td>
       <td class="p-2 recording-date text-sm text-gray-600 dark:text-gray-400">${formattedDate}</td>
+      <td class="p-2 text-sm text-right text-gray-600 dark:text-gray-400">${formatBytes(sizeBytes)}</td>
       <td class="p-2">
         <button class="delete-button bg-red-500 hover:bg-red-600 text-white rounded-md px-3 py-2 flex items-center transition-colors duration-200 shadow-sm">
           <i class="fas fa-times mr-1"></i><span class="hidden sm:inline">Delete</span>
