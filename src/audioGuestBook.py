@@ -3,11 +3,14 @@ import logging
 import RPi.GPIO as GPIO
 import subprocess
 import time
+import threading
 import yaml
 from datetime import datetime
 from pathlib import Path
 import os
+import shutil
 import sys
+import tempfile
 
 # Optional WS2812B LED support (install rpi-ws281x to enable)
 try:
@@ -201,6 +204,51 @@ def record_audio(out_file, config):
     ext = Path(out_file).suffix.lower().lstrip('.')
     recording_gain = _clamp_float(config.get('recording_gain', 1.0), 1.0, 0.1, 4.0)
     requires_ffmpeg = ext in FFMPEG_FILE_TYPES or abs(recording_gain - 1.0) > 1e-6
+
+    # For compressed targets we capture PCM first to avoid ffmpeg startup latency
+    # clipping the first words of a message, then transcode on stop.
+    if ext in FFMPEG_FILE_TYPES:
+        if shutil.which("ffmpeg") is None:
+            logger.error("'ffmpeg' not found. Install it to record compressed formats (e.g. 'sudo apt install ffmpeg').")
+            return None
+
+        tmp_handle = tempfile.NamedTemporaryFile(
+            prefix=f"{Path(out_file).stem}.",
+            suffix=".capture.wav",
+            dir=str(Path(out_file).parent),
+            delete=False,
+        )
+        tmp_capture = Path(tmp_handle.name)
+        tmp_handle.close()
+
+        cmd = [
+            "arecord", "-q",
+            "-f", config['format'],
+            "-t", "wav",
+            "-D", config['alsa_hw_mapping'],
+            "-r", str(config['sample_rate']),
+            "-c", str(config['channels']),
+            str(tmp_capture)
+        ]
+
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except FileNotFoundError:
+            logger.error("'arecord' not found. Is ALSA installed?")
+            try:
+                tmp_capture.unlink(missing_ok=True)
+            except TypeError:
+                if tmp_capture.exists():
+                    tmp_capture.unlink()
+            return None
+
+        proc._agb_finalize = {
+            "mode": "transcode",
+            "temp_file": str(tmp_capture),
+            "out_file": str(out_file),
+            "recording_gain": recording_gain,
+        }
+        return proc
     
     if requires_ffmpeg:
         cmd = [
@@ -248,6 +296,79 @@ def record_audio(out_file, config):
         logger.error(f"'{cmd[0]}' not found. Install it to record .{ext} files (e.g. 'sudo apt install ffmpeg').")
         return None
 
+
+def _finalize_compressed_recording_async(temp_file, out_file, recording_gain, name="recording"):
+    """Transcode a finished WAV capture in the background.
+
+    The WAV remains on disk if transcoding fails so the recording is never lost.
+    """
+
+    def worker(source_wav, target_file, gain, label):
+        source_path = Path(source_wav)
+        target_path = Path(target_file)
+
+        if not source_path.exists():
+            logger.error(f"Temporary capture missing; cannot finalize {label}: {source_path}")
+            return
+
+        if shutil.which("ffmpeg") is None:
+            logger.warning(f"'ffmpeg' not found while finalizing {label}; keeping WAV fallback: {source_path.name}")
+            return
+
+        partial_target = target_path.with_name(f"{target_path.name}.partial")
+        try:
+            if partial_target.exists():
+                partial_target.unlink()
+        except OSError:
+            pass
+
+        transcode_cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", str(source_path)]
+        if abs(gain - 1.0) > 1e-6:
+            transcode_cmd.extend(["-filter:a", f"volume={gain}"])
+        transcode_cmd.append(str(partial_target))
+
+        try:
+            result = subprocess.run(
+                transcode_cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        except FileNotFoundError:
+            logger.warning(f"ffmpeg vanished while finalizing {label}; keeping WAV fallback: {source_path.name}")
+            return
+
+        if result and result.returncode == 0 and partial_target.exists():
+            try:
+                partial_target.replace(target_path)
+                source_path.unlink()
+                logger.info(f"Finalized {label}: {target_path.name}")
+            except OSError as e:
+                logger.error(f"Failed to publish finalized {label}; keeping WAV fallback {source_path.name}: {e}")
+                try:
+                    if partial_target.exists():
+                        partial_target.unlink()
+                except OSError:
+                    pass
+            return
+
+        logger.error(
+            f"Failed to transcode {label} to {target_path.suffix}; keeping WAV fallback {source_path.name}."
+        )
+        try:
+            if partial_target.exists():
+                partial_target.unlink()
+        except OSError:
+            pass
+
+    thread = threading.Thread(
+        target=worker,
+        args=(str(temp_file), str(out_file), recording_gain, name),
+        daemon=True,
+        name=f"finalize-{Path(out_file).stem}",
+    )
+    thread.start()
+
 def start_recording(config):
     """Start recording process for guest recording."""
     timestamp = datetime.now().isoformat().replace(':','-')
@@ -286,6 +407,29 @@ def stop_recording(proc, name="recording"):
             proc.wait(timeout=2)
         except subprocess.TimeoutExpired:
             proc.kill()
+
+    finalize = getattr(proc, "_agb_finalize", None)
+    if not finalize or finalize.get("mode") != "transcode":
+        return
+
+    temp_file = Path(finalize["temp_file"])
+    out_file = Path(finalize["out_file"])
+    gain = _clamp_float(finalize.get("recording_gain", 1.0), 1.0, 0.1, 4.0)
+    if not temp_file.exists():
+        logger.error(f"Temporary capture missing, cannot finalize {name}: {temp_file}")
+        return
+
+    fallback_file = out_file.with_suffix(".wav")
+    try:
+        fallback_file.parent.mkdir(parents=True, exist_ok=True)
+        if fallback_file.exists():
+            fallback_file.unlink()
+        temp_file.rename(fallback_file)
+    except OSError as e:
+        logger.error(f"Failed to store WAV fallback for {name}: {e}")
+        return
+
+    _finalize_compressed_recording_async(fallback_file, out_file, gain, name=name)
 
 def check_shutdown_button(pin_shutdown, hold_time=4.0):
     """

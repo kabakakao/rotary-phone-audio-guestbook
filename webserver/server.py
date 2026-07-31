@@ -602,10 +602,44 @@ def _play_audio_once(file_path, hw_mapping, mixer_control, level, gain):
 
 
 def _build_record_command(out_file, current_config):
-    """Build recording command (arecord or ffmpeg) based on extension and gain."""
+    """Build recording command and optional finalize metadata.
+
+    For compressed targets (mp3/ogg) we capture to temporary WAV first so
+    recording starts immediately, then transcode on stop.
+    """
     ext = Path(out_file).suffix.lower().lstrip(".")
     recording_gain = _clamp_float(current_config.get("recording_gain", 1.0), 1.0, 0.1, 4.0)
     requires_ffmpeg = ext in FFMPEG_FILE_TYPES or abs(recording_gain - 1.0) > 1e-6
+
+    if ext in FFMPEG_FILE_TYPES:
+        if shutil.which("ffmpeg") is None:
+            raise FileNotFoundError("ffmpeg")
+
+        tmp_handle = tempfile.NamedTemporaryFile(
+            prefix=f"{Path(out_file).stem}.",
+            suffix=".capture.wav",
+            dir=str(Path(out_file).parent),
+            delete=False,
+        )
+        tmp_capture = Path(tmp_handle.name)
+        tmp_handle.close()
+
+        cmd = [
+            "arecord", "-q",
+            "-f", str(current_config.get("format", "cd")),
+            "-t", "wav",
+            "-D", str(current_config.get("alsa_hw_mapping", "default")),
+            "-r", str(int(current_config.get("sample_rate") or 44100)),
+            "-c", str(int(current_config.get("channels") or 1)),
+            str(tmp_capture),
+        ]
+        finalize_meta = {
+            "mode": "transcode",
+            "temp_file": str(tmp_capture),
+            "out_file": str(out_file),
+            "recording_gain": recording_gain,
+        }
+        return cmd, False, ext, finalize_meta
 
     if requires_ffmpeg:
         cmd = [
@@ -618,7 +652,7 @@ def _build_record_command(out_file, current_config):
         if abs(recording_gain - 1.0) > 1e-6:
             cmd.extend(["-filter:a", f"volume={recording_gain}"])
         cmd.append(str(out_file))
-        return cmd, requires_ffmpeg, ext
+        return cmd, requires_ffmpeg, ext, None
 
     arecord_type = ext if ext in NATIVE_FILE_TYPES else "wav"
     cmd = [
@@ -630,7 +664,123 @@ def _build_record_command(out_file, current_config):
         "-c", str(int(current_config.get("channels") or 1)),
         str(out_file),
     ]
-    return cmd, requires_ffmpeg, ext
+    return cmd, requires_ffmpeg, ext, None
+
+
+def _finalize_recording_process(proc, label="recording"):
+    """Finalize a recording process that captured to temporary WAV first."""
+    finalize = getattr(proc, "_agb_finalize", None)
+    if not finalize or finalize.get("mode") != "transcode":
+        return True, None
+
+    temp_file = Path(finalize["temp_file"])
+    out_file = Path(finalize["out_file"])
+    gain = _clamp_float(finalize.get("recording_gain", 1.0), 1.0, 0.1, 4.0)
+
+    if not temp_file.exists():
+        message = f"Temporary capture missing; could not finalize {label}."
+        logger.error(message)
+        return False, message
+
+    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", str(temp_file)]
+    if abs(gain - 1.0) > 1e-6:
+        cmd.extend(["-filter:a", f"volume={gain}"])
+    cmd.append(str(out_file))
+
+    try:
+        result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    except FileNotFoundError:
+        result = None
+
+    if result and result.returncode == 0:
+        try:
+            temp_file.unlink()
+        except OSError:
+            pass
+        return True, None
+
+    recovery = out_file.with_suffix(".wav")
+    if recovery.exists():
+        recovery = recovery.with_name(f"{recovery.stem}.unconverted.wav")
+    try:
+        temp_file.rename(recovery)
+        message = (
+            f"Failed to encode {out_file.suffix}; saved raw audio as {recovery.name}."
+        )
+        logger.error(message)
+        return False, message
+    except OSError as e:
+        message = f"Failed to encode recording and preserve temp file: {e}"
+        logger.error(message)
+        return False, message
+
+
+def _finalize_recording_async(temp_file, out_file, recording_gain, label="recording"):
+    """Finalize a WAV capture in the background.
+
+    The WAV fallback is preserved if transcoding fails.
+    """
+
+    def worker(source_wav, target_file, gain, label_name):
+        source_path = Path(source_wav)
+        target_path = Path(target_file)
+
+        if not source_path.exists():
+            logger.error(f"Temporary capture missing; cannot finalize {label_name}: {source_path}")
+            return
+
+        if shutil.which("ffmpeg") is None:
+            logger.warning(f"'ffmpeg' not found while finalizing {label_name}; keeping WAV fallback: {source_path.name}")
+            return
+
+        partial_target = target_path.with_name(f"{target_path.name}.partial")
+        try:
+            if partial_target.exists():
+                partial_target.unlink()
+        except OSError:
+            pass
+
+        cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", str(source_path)]
+        if abs(gain - 1.0) > 1e-6:
+            cmd.extend(["-filter:a", f"volume={gain}"])
+        cmd.append(str(partial_target))
+
+        try:
+            result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        except FileNotFoundError:
+            logger.warning(f"ffmpeg vanished while finalizing {label_name}; keeping WAV fallback: {source_path.name}")
+            return
+
+        if result and result.returncode == 0 and partial_target.exists():
+            try:
+                partial_target.replace(target_path)
+                source_path.unlink()
+                logger.info(f"Finalized {label_name}: {target_path.name}")
+            except OSError as e:
+                logger.error(f"Failed to publish finalized {label_name}; keeping WAV fallback {source_path.name}: {e}")
+                try:
+                    if partial_target.exists():
+                        partial_target.unlink()
+                except OSError:
+                    pass
+            return
+
+        logger.error(
+            f"Failed to transcode {label_name} to {target_path.suffix}; keeping WAV fallback {source_path.name}."
+        )
+        try:
+            if partial_target.exists():
+                partial_target.unlink()
+        except OSError:
+            pass
+
+    thread = threading.Thread(
+        target=worker,
+        args=(str(temp_file), str(out_file), recording_gain, label),
+        daemon=True,
+        name=f"finalize-{Path(out_file).stem}",
+    )
+    thread.start()
 
 
 def _library_hook_state_payload():
@@ -746,9 +896,16 @@ def greeting_record_start():
     capture_volume = _clamp_float(current_config.get("capture_volume", 1.0), 1.0, 0.0, 1.0)
     _set_amixer_percent(capture_control, int(capture_volume * 100), capture=True)
 
-    cmd, requires_ffmpeg, cmd_ext = _build_record_command(temp_path, current_config)
+    try:
+        cmd, requires_ffmpeg, cmd_ext, finalize_meta = _build_record_command(temp_path, current_config)
+    except FileNotFoundError as e:
+        missing_tool = str(e) or "ffmpeg"
+        return jsonify({"success": False, "message": f"'{missing_tool}' not found. Install required recording tools."}), 500
+
     try:
         greeting_record_proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if finalize_meta:
+            greeting_record_proc._agb_finalize = finalize_meta
     except FileNotFoundError:
         if requires_ffmpeg and cmd_ext not in FFMPEG_FILE_TYPES:
             fallback_cmd = [
@@ -767,7 +924,7 @@ def greeting_record_start():
             except FileNotFoundError:
                 return jsonify({"success": False, "message": "Recording tools not found (arecord/ffmpeg)."}), 500
         else:
-            return jsonify({"success": False, "message": "Recording tool not found. Install ffmpeg for this setup."}), 500
+            return jsonify({"success": False, "message": "Recording tool not found (arecord/ffmpeg)."}), 500
 
     greeting_record_temp_file = str(temp_path)
     greeting_record_started_at = time.time()
@@ -792,16 +949,26 @@ def greeting_record_stop():
             return jsonify({"success": True, "message": "Recording already stopped.", **state})
         return jsonify({"success": False, "message": "No active greeting recording.", **state}), 400
 
-    greeting_record_proc.terminate()
+    proc_to_finalize = greeting_record_proc
+    proc_to_finalize.terminate()
     try:
-        greeting_record_proc.wait(timeout=2)
+        proc_to_finalize.wait(timeout=2)
     except subprocess.TimeoutExpired:
-        greeting_record_proc.kill()
+        proc_to_finalize.kill()
+
+    finalized_ok, finalize_message = _finalize_recording_process(proc_to_finalize, label="greeting recording")
 
     greeting_record_proc = None
     greeting_record_started_at = None
 
     state = _greeting_record_state_payload()
+    if not finalized_ok:
+        return jsonify({
+            "success": False,
+            "message": finalize_message or "Greeting recording stopped, but encoding failed.",
+            **state,
+        }), 500
+
     if not state["has_recording"]:
         return jsonify({"success": False, "message": "Recording stopped but no temp file was created.", **state}), 500
 
@@ -1056,9 +1223,16 @@ def _library_simulate_sequence(config: dict, abort_event: threading.Event) -> No
         capture_volume  = _clamp_float(config.get("capture_volume", 1.0), 1.0, 0.0, 1.0)
         _set_amixer_percent(capture_control, int(capture_volume * 100), capture=True)
 
-        cmd, requires_ffmpeg, ext = _build_record_command(out_file, config)
+        try:
+            cmd, requires_ffmpeg, ext, finalize_meta = _build_record_command(out_file, config)
+        except FileNotFoundError as e:
+            logger.error(f"Recording tool not found in simulation: {e}")
+            return
+
         try:
             proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if finalize_meta:
+                proc._agb_finalize = finalize_meta
         except FileNotFoundError:
             if requires_ffmpeg and ext not in FFMPEG_FILE_TYPES:
                 fallback_cmd = [
@@ -1172,11 +1346,36 @@ def simulate_hook_down():
     if library_recording_started_at:
         duration = max(0, int(time.time() - library_recording_started_at))
 
-    library_recording_proc.terminate()
+    proc_to_finalize = library_recording_proc
+    proc_to_finalize.terminate()
     try:
-        library_recording_proc.wait(timeout=2)
+        proc_to_finalize.wait(timeout=2)
     except subprocess.TimeoutExpired:
-        library_recording_proc.kill()
+        proc_to_finalize.kill()
+
+    finalized_ok = True
+    finalize_message = None
+    if proc_to_finalize is not None:
+        finalize = getattr(proc_to_finalize, "_agb_finalize", None)
+        if finalize and finalize.get("mode") == "transcode":
+            temp_file = Path(finalize["temp_file"])
+            out_file = Path(finalize["out_file"])
+            gain = _clamp_float(finalize.get("recording_gain", 1.0), 1.0, 0.1, 4.0)
+            fallback_file = out_file.with_suffix(".wav")
+            try:
+                fallback_file.parent.mkdir(parents=True, exist_ok=True)
+                if fallback_file.exists():
+                    fallback_file.unlink()
+                if temp_file.exists():
+                    temp_file.rename(fallback_file)
+                    finished_file = fallback_file.name
+                    _finalize_recording_async(fallback_file, out_file, gain, label="simulation recording")
+                else:
+                    finalized_ok = False
+                    finalize_message = f"Temporary capture missing; could not finalize simulation recording."
+            except OSError as e:
+                finalized_ok = False
+                finalize_message = f"Failed to store WAV fallback for simulation recording: {e}"
 
     library_recording_proc = None
     library_recording_file = None
@@ -1185,9 +1384,13 @@ def simulate_hook_down():
     _library_abort_event = None
     _library_hook_thread = None
 
+    message = f"Simulated hook-down: recording saved ({finished_file}, {duration}s)."
+    if not finalized_ok and finalize_message:
+        message = f"Simulated hook-down: recording stopped, but encoding failed. {finalize_message}"
+
     return jsonify({
         "success": True,
-        "message": f"Simulated hook-down: recording saved ({finished_file}, {duration}s).",
+        "message": message,
         **_library_hook_state_payload(),
     })
 
