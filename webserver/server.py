@@ -168,8 +168,15 @@ def get_recordings():
             for item in all_items:
                 logger.info(f"  - {item.name} ({'file' if item.is_file() else 'dir'})")
 
-            files = [f.name for f in all_items if f.is_file()]
-            logger.info(f"Found {len(files)} files: {files}")
+            files = [
+                {
+                    "filename": f.name,
+                    "size_bytes": f.stat().st_size,
+                }
+                for f in all_items
+                if f.is_file()
+            ]
+            logger.info(f"Found {len(files)} files")
             return jsonify(files)
         else:
             logger.error(f"Recordings path is not a valid directory: {recordings_path}")
