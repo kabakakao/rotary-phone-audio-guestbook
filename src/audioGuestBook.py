@@ -552,6 +552,7 @@ def main():
                     # Check if user hung up during delay
                     if is_on_hook(config['hook_gpio'], hook_type, invert_hook):
                         logger.info("Handset replaced during delay - aborting")
+                        set_led_color(0, 0, 255)
                         prev_was_on_hook = is_on_hook(config['hook_gpio'], hook_type, invert_hook)
                         continue
                 
@@ -566,6 +567,7 @@ def main():
                     invert_hook,
                     config.get('playback_gain', 1.0)
                 ):
+                    set_led_color(0, 0, 255)
                     prev_was_on_hook = is_on_hook(config['hook_gpio'], hook_type, invert_hook)
                     continue
                 
@@ -585,6 +587,7 @@ def main():
                     invert_hook,
                     config.get('playback_gain', 1.0)
                 ):
+                    set_led_color(0, 0, 255)
                     prev_was_on_hook = is_on_hook(config['hook_gpio'], hook_type, invert_hook)
                     continue
                 
