@@ -87,20 +87,25 @@ for candidate in /boot/firmware/config.txt /boot/config.txt; do
 done
 
 if [ -n "${BOOT_CONFIG}" ]; then
-    if ! grep -q '^# AGB early boot LEDs$' "${BOOT_CONFIG}"; then
+    if grep -q '^# AGB early boot LEDs$' "${BOOT_CONFIG}"; then
+        sed -i '/^# AGB early boot LEDs$/,/^gpio=4=op,/c\
+# AGB early boot LEDs\
+gpio=2=op,dl\
+gpio=3=op,dh\
+gpio=4=op,dh' "${BOOT_CONFIG}"
+        log "Updated early boot LEDs in ${BOOT_CONFIG}"
+    else
         cat >> "${BOOT_CONFIG}" <<'EOF'
 
 # AGB early boot LEDs
-gpio=2=op,dh
-gpio=3=op,dl
-gpio=4=op,dl
+gpio=2=op,dl
+gpio=3=op,dh
+gpio=4=op,dh
 EOF
         log "Configured early boot LEDs in ${BOOT_CONFIG}"
-    else
-        log "Early boot LEDs already configured in ${BOOT_CONFIG}"
     fi
 else
-    warn "No Raspberry Pi config.txt found; configure gpio=2=op,dh manually."
+    warn "No Raspberry Pi config.txt found; configure the active-low LED GPIOs manually."
 fi
 
 # ---------------------------------------------------------------------------

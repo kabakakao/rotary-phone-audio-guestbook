@@ -41,7 +41,7 @@ led_blink_thread = None
 
 
 def setup_led(config):
-    """Initialise the red, blue, and green LEDs on their GPIO pins."""
+    """Initialise active-low red, blue, and green LEDs on their GPIO pins."""
     global led_pins
     led_pins = {
         'red': int(config.get('red_led_gpio', 0)),
@@ -50,17 +50,17 @@ def setup_led(config):
     }
     for color, pin in led_pins.items():
         if pin:
-            GPIO.setup(pin, GPIO.OUT, initial=GPIO.LOW)
+            GPIO.setup(pin, GPIO.OUT, initial=GPIO.HIGH)
             logger.info(f"{color.capitalize()} LED initialised on GPIO {pin}")
 
 
 def set_led_color(r, g, b):
-    """Set the discrete RGB LEDs from 0-255 colour channel values."""
+    """Set active-low discrete RGB LEDs from 0-255 colour channel values."""
     stop_led_blink()
     for color, value in (('red', r), ('blue', b), ('green', g)):
         pin = led_pins.get(color, 0)
         if pin:
-            GPIO.output(pin, GPIO.HIGH if value > 0 else GPIO.LOW)
+            GPIO.output(pin, GPIO.LOW if value > 0 else GPIO.HIGH)
 
 
 def stop_led_blink():
@@ -80,7 +80,7 @@ def start_led_blink(color, interval=0.5):
     stop_led_blink()
     for other_color, pin in led_pins.items():
         if pin and other_color != color:
-            GPIO.output(pin, GPIO.LOW)
+            GPIO.output(pin, GPIO.HIGH)
     led_blink_stop = threading.Event()
     stop_event = led_blink_stop
 
@@ -89,12 +89,12 @@ def start_led_blink(color, interval=0.5):
         while not stop_event.is_set():
             pin = led_pins.get(color, 0)
             if pin:
-                GPIO.output(pin, GPIO.HIGH if is_on else GPIO.LOW)
+                GPIO.output(pin, GPIO.LOW if is_on else GPIO.HIGH)
             is_on = not is_on
             stop_event.wait(interval)
         pin = led_pins.get(color, 0)
         if pin:
-            GPIO.output(pin, GPIO.LOW)
+            GPIO.output(pin, GPIO.HIGH)
 
     led_blink_thread = threading.Thread(target=blink, daemon=True)
     led_blink_thread.start()
@@ -481,9 +481,9 @@ def main():
     # Hook GPIO (handset)
     GPIO.setup(config['hook_gpio'], GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
-    # LED setup – red = on hook (idle)
+    # LED setup – blue = on hook (idle)
     setup_led(config)
-    set_led_color(0, 255, 0)
+    set_led_color(0, 0, 255)
     
     # Record greeting button (optional)
     has_record_greeting = config.get('record_greeting_gpio', 0) != 0
@@ -597,7 +597,7 @@ def main():
             # ON-HOOK: User replaced handset
             if not prev_was_on_hook and currently_on_hook:
                 logger.info("[ON-HOOK] Handset replaced")
-                set_led_color(0, 255, 0)  # Blue – on hook (idle)
+                set_led_color(0, 0, 255)  # Blue – on hook (idle)
                 if recording_proc:
                     stop_recording(recording_proc)
                     recording_proc = None
