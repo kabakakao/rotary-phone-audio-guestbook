@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 import logging
+import shutil
 import subprocess
 import time
-
-import RPi.GPIO as GPIO
 
 SERVICE_NAME = "audioGuestBook.service"
 RED_LED_GPIO = 2
@@ -24,9 +23,21 @@ def service_is_active():
     return result.returncode == 0
 
 
+def set_red_led(on):
+    level = "dl" if on else "dh"
+    subprocess.run(
+        ["pinctrl", "set", str(RED_LED_GPIO), "op", level],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
 def main():
-    GPIO.setmode(GPIO.BCM)
-    GPIO.setup(RED_LED_GPIO, GPIO.OUT, initial=GPIO.HIGH)
+    if shutil.which("pinctrl") is None:
+        raise RuntimeError("pinctrl is required for the LED watchdog")
+
+    set_red_led(False)
     restart_requested = False
     red_is_on = False
 
@@ -37,7 +48,7 @@ def main():
                     logger.info("Guestbook service is active again")
                 restart_requested = False
                 red_is_on = False
-                GPIO.output(RED_LED_GPIO, GPIO.HIGH)
+                set_red_led(False)
                 time.sleep(BLINK_INTERVAL)
                 continue
 
@@ -47,13 +58,12 @@ def main():
                 restart_requested = True
 
             red_is_on = not red_is_on
-            GPIO.output(RED_LED_GPIO, GPIO.LOW if red_is_on else GPIO.HIGH)
+            set_red_led(red_is_on)
             time.sleep(BLINK_INTERVAL)
     except KeyboardInterrupt:
         pass
     finally:
-        GPIO.output(RED_LED_GPIO, GPIO.HIGH)
-        GPIO.cleanup()
+        set_red_led(False)
 
 
 if __name__ == "__main__":
