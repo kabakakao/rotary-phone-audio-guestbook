@@ -92,7 +92,9 @@ WIFI_COUNTRY=DE sudo -E ./install.sh
 `install.sh` installs the apt dependencies, configures GPIO (`lgpio` backend),
 sets the early boot LED state in the Raspberry Pi firmware `config.txt`,
 configures boot-time USB audio auto-detection, the NetworkManager hotspot
-fallback, and the systemd services. It is safe to re-run.
+fallback, the systemd services, and an independent watchdog for the guestbook
+service. The watchdog restarts an inactive guestbook service and blinks the red
+LED while it is unavailable. It is safe to re-run.
 
 ## Iterating on code on the device
 

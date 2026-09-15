@@ -3,10 +3,10 @@ Description=Rotary Phone Audio Guestbook Web Server
 After=network.target
 
 [Service]
-User=admin
-Group=admin
-WorkingDirectory=/home/admin/rotary-phone-audio-guestbook
-ExecStart=/home/admin/rotary-phone-audio-guestbook/start_server.sh
+User=audiobook
+Group=audiobook
+WorkingDirectory=/home/audiobook/rotary-phone-audio-guestbook
+ExecStart=/home/audiobook/rotary-phone-audio-guestbook/start_server.sh
 Restart=always
 
 [Install]

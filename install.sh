@@ -299,6 +299,11 @@ if systemd_running; then
 fi
 rm -f /etc/systemd/system/agb-boot-led.service
 
+install -m 0644 "${INSTALL_DIR}/agb-audio-watchdog.service" \
+    /etc/systemd/system/agb-audio-watchdog.service
+sed -i "s|/home/admin/rotary-phone-audio-guestbook|${INSTALL_DIR}|" \
+    /etc/systemd/system/agb-audio-watchdog.service
+
 for svc in audioGuestBook audioGuestBookWebServer; do
     unit="${INSTALL_DIR}/${svc}.service"
     [ -f "${unit}" ] || { warn "Missing ${unit}, skipping."; continue; }
@@ -339,10 +344,12 @@ if systemd_running; then
     systemctl enable --now agb-audio-detect.service
     /usr/local/sbin/agb-audio-detect.sh || true   # configure immediately too
     systemctl enable --now audioGuestBook.service audioGuestBookWebServer.service
+    systemctl enable --now agb-audio-watchdog.service
     systemctl restart audioGuestBook.service audioGuestBookWebServer.service
 else
     systemctl enable agb-audio-detect.service
     systemctl enable audioGuestBook.service audioGuestBookWebServer.service
+    systemctl enable agb-audio-watchdog.service
 fi
 
 # ---------------------------------------------------------------------------
