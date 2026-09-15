@@ -2,20 +2,13 @@
 import logging
 import RPi.GPIO as GPIO
 import subprocess
+import threading
 import time
 import yaml
 from datetime import datetime
 from pathlib import Path
 import os
 import sys
-
-# Optional WS2812B LED support (install rpi-ws281x to enable)
-try:
-    from rpi_ws281x import PixelStrip, Color as _WS2812Color
-    _WS2812_AVAILABLE = True
-except ImportError:
-    _WS2812_AVAILABLE = False
-    _WS2812Color = None
 
 # Setup logging
 logging.basicConfig(
@@ -38,46 +31,70 @@ recording_proc = None
 recording_start_ts = None
 record_greeting_proc = None
 
-# WS2812B LED strip instance (None = disabled or not initialised)
-led_strip = None
-
-# LED hardware constants (sensible defaults for RPi WS2812B wiring)
-_LED_FREQ_HZ = 800000   # 800 kHz signal
-_LED_DMA     = 10       # DMA channel
-_LED_INVERT  = False    # True if using NPN transistor level-shift
-_LED_CHANNEL = 0        # 0 for GPIO 18/12, 1 for GPIO 13/19
+# Discrete RGB LED GPIO pins
+led_pins = {}
+led_blink_stop = None
+led_blink_thread = None
 
 
 def setup_led(config):
-    """Initialise a single WS2812B LED on the configured GPIO pin.
-    Set led_gpio: 0 in config to disable."""
-    global led_strip
-    led_gpio = int(config.get('led_gpio', 0))
-    if not _WS2812_AVAILABLE or led_gpio == 0:
-        if led_gpio != 0 and not _WS2812_AVAILABLE:
-            logger.warning("led_gpio is set but rpi_ws281x is not installed – LED disabled. "
-                           "Install with: sudo pip3 install rpi-ws281x")
-        return
-    brightness = max(0, min(int(config.get('led_brightness', 128)), 255))
-    try:
-        strip = PixelStrip(1, led_gpio, _LED_FREQ_HZ, _LED_DMA, _LED_INVERT,
-                           brightness, _LED_CHANNEL)
-        strip.begin()
-        led_strip = strip
-        logger.info(f"WS2812B LED initialised on GPIO {led_gpio}, brightness={brightness}")
-    except Exception as e:
-        logger.warning(f"WS2812B LED setup failed (check wiring / run as root): {e}")
+    """Initialise the red, blue, and green LEDs on their GPIO pins."""
+    global led_pins
+    led_pins = {
+        'red': int(config.get('red_led_gpio', 0)),
+        'blue': int(config.get('blue_led_gpio', 0)),
+        'green': int(config.get('green_led_gpio', 0)),
+    }
+    for color, pin in led_pins.items():
+        if pin:
+            GPIO.setup(pin, GPIO.OUT, initial=GPIO.LOW)
+            logger.info(f"{color.capitalize()} LED initialised on GPIO {pin}")
 
 
 def set_led_color(r, g, b):
-    """Set the LED to the given RGB colour. No-op if LED is not initialised."""
-    if led_strip is None:
-        return
-    try:
-        led_strip.setPixelColor(0, _WS2812Color(r, g, b))
-        led_strip.show()
-    except Exception as e:
-        logger.debug(f"LED colour update failed: {e}")
+    """Set the discrete RGB LEDs from 0-255 colour channel values."""
+    stop_led_blink()
+    for color, value in (('red', r), ('blue', b), ('green', g)):
+        pin = led_pins.get(color, 0)
+        if pin:
+            GPIO.output(pin, GPIO.HIGH if value > 0 else GPIO.LOW)
+
+
+def stop_led_blink():
+    """Stop a running LED blink loop."""
+    global led_blink_stop, led_blink_thread
+    if led_blink_stop is not None:
+        led_blink_stop.set()
+    if led_blink_thread is not None and led_blink_thread is not threading.current_thread():
+        led_blink_thread.join(timeout=1)
+    led_blink_stop = None
+    led_blink_thread = None
+
+
+def start_led_blink(color, interval=0.5):
+    """Blink one LED until another LED state is selected."""
+    global led_blink_stop, led_blink_thread
+    stop_led_blink()
+    for other_color, pin in led_pins.items():
+        if pin and other_color != color:
+            GPIO.output(pin, GPIO.LOW)
+    led_blink_stop = threading.Event()
+    stop_event = led_blink_stop
+
+    def blink():
+        is_on = False
+        while not stop_event.is_set():
+            pin = led_pins.get(color, 0)
+            if pin:
+                GPIO.output(pin, GPIO.HIGH if is_on else GPIO.LOW)
+            is_on = not is_on
+            stop_event.wait(interval)
+        pin = led_pins.get(color, 0)
+        if pin:
+            GPIO.output(pin, GPIO.LOW)
+
+    led_blink_thread = threading.Thread(target=blink, daemon=True)
+    led_blink_thread.start()
 
 
 def led_off():
@@ -322,7 +339,7 @@ def main():
 
     # LED setup – red = on hook (idle)
     setup_led(config)
-    set_led_color(255, 0, 0)
+    set_led_color(0, 255, 0)
     
     # Record greeting button (optional)
     has_record_greeting = config.get('record_greeting_gpio', 0) != 0
@@ -381,7 +398,7 @@ def main():
             # OFF-HOOK: User lifted handset
             if prev_was_on_hook and not currently_on_hook:
                 logger.info("\n[OFF-HOOK] Handset lifted")
-                set_led_color(255, 100, 0)  # Yellow – greeting / beep playing
+                start_led_blink('blue')  # Greeting / beep playing
 
                 # Greeting start delay
                 delay = config.get('greeting_start_delay', 0)
@@ -436,7 +453,7 @@ def main():
             # ON-HOOK: User replaced handset
             if not prev_was_on_hook and currently_on_hook:
                 logger.info("[ON-HOOK] Handset replaced")
-                set_led_color(255, 0, 0)  # Red – on hook (idle)
+                set_led_color(0, 255, 0)  # Blue – on hook (idle)
                 if recording_proc:
                     stop_recording(recording_proc)
                     recording_proc = None
@@ -450,7 +467,7 @@ def main():
                     stop_recording(recording_proc)
                     recording_proc = None
                     recording_start_ts = None
-                    set_led_color(255, 100, 0)  # Yellow – playing time-exceeded message
+                    start_led_blink('blue')  # Playing time-exceeded message
 
                     # Play time exceeded message (interruptible)
                     play_audio_interruptible(

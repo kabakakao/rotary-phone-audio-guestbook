@@ -17,7 +17,7 @@ channels: 2
 capture_volume: 1.0 # 0.0 - 1.0 input level via amixer before recording
 recording_gain: 1.0 # 0.1 - 4.0 software gain for recordings (ffmpeg required >1.0)
 playback_gain: 1.0 # 0.1 - 4.0 software gain for greeting/beep/time_exceeded playback
-hook_gpio: 22
+hook_gpio: 21
 hook_type: NC # or 'NO' depending on your hardware configuration
 invert_hook: false # Set to true if your hook behavior is reversed (recording starts when handset is down instead of up)
 # Software bounce compensation this is the length of time (in seconds) that the component will ignore changes in state after an initial change.
@@ -48,11 +48,11 @@ recordings_path: __INSTALL_DIR__/recordings
 shutdown_gpio: 0 #Set GPIO pin here --> Note: Pin is active LOW, pull Pin to GND to activate shutdown
 shutdown_button_hold_time: 2 # default 2 seconds
 
-# WS2812B LED (NeoPixel) – set led_gpio to 0 to disable
-# Requires: sudo pip3 install rpi-ws281x
+# Discrete RGB LEDs (BCM GPIO numbering)
 # Red = on hook (idle) | Yellow = greeting/beep | Green = recording
-led_gpio: 0           # GPIO data pin (e.g. 18 for PWM0 / 21 for PCM)
-led_brightness: 128   # 0-255
+red_led_gpio: 2
+blue_led_gpio: 3
+green_led_gpio: 4
 
 # UI Customizations
 ui:

@@ -1,5 +1,32 @@
 # Hardware
 
+## Status LEDs
+
+The three LEDs use BCM GPIO numbering and are active-high:
+
+- red: GPIO2
+- blue: GPIO3
+- green: GPIO4
+
+Connect each LED through its own series resistor (220-1,000 ohms) to 3.3 V
+GPIO, with the cathode connected to GND. The Raspberry Pi firmware can set
+these pins before Linux and systemd start. Add the following lines to
+`config.txt` on the Pi (`/boot/firmware/config.txt` on current Raspberry Pi OS,
+or `/boot/config.txt` on older releases):
+
+```
+# AGB early boot LEDs
+gpio=2=op,dh
+gpio=3=op,dl
+gpio=4=op,dl
+```
+
+After saving, reboot the Pi. GPIO2 is then high, so the red LED is on during
+the early boot process. The guestbook service takes over the LED states later.
+
+GPIO2 and GPIO3 are also the default I2C SDA/SCL pins. Do not use this wiring
+if the Pi needs I2C on those pins.
+
 ## Wiring
 
 ### Hook

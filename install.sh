@@ -75,6 +75,35 @@ fi
 install -d "${INSTALL_DIR}/recordings"
 
 # ---------------------------------------------------------------------------
+# 1b. Configure the boot LED in Raspberry Pi firmware
+#     This runs before systemd, so the red LED is on during early boot.
+# ---------------------------------------------------------------------------
+BOOT_CONFIG=""
+for candidate in /boot/firmware/config.txt /boot/config.txt; do
+    if [ -f "${candidate}" ]; then
+        BOOT_CONFIG="${candidate}"
+        break
+    fi
+done
+
+if [ -n "${BOOT_CONFIG}" ]; then
+    if ! grep -q '^# AGB early boot LEDs$' "${BOOT_CONFIG}"; then
+        cat >> "${BOOT_CONFIG}" <<'EOF'
+
+# AGB early boot LEDs
+gpio=2=op,dh
+gpio=3=op,dl
+gpio=4=op,dl
+EOF
+        log "Configured early boot LEDs in ${BOOT_CONFIG}"
+    else
+        log "Early boot LEDs already configured in ${BOOT_CONFIG}"
+    fi
+else
+    warn "No Raspberry Pi config.txt found; configure gpio=2=op,dh manually."
+fi
+
+# ---------------------------------------------------------------------------
 # 2. System packages (no pip / no venv)
 # ---------------------------------------------------------------------------
 log "Installing system packages..."
@@ -258,6 +287,13 @@ EOF
 #    pin the GPIO backend, fix the working directory, and order audio first.
 # ---------------------------------------------------------------------------
 log "Installing systemd services..."
+
+# The firmware config.txt now handles the early boot LED state.
+if systemd_running; then
+    systemctl disable --now agb-boot-led.service 2>/dev/null || true
+fi
+rm -f /etc/systemd/system/agb-boot-led.service
+
 for svc in audioGuestBook audioGuestBookWebServer; do
     unit="${INSTALL_DIR}/${svc}.service"
     [ -f "${unit}" ] || { warn "Missing ${unit}, skipping."; continue; }

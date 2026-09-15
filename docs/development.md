@@ -89,7 +89,10 @@ Or, from a checkout, passing the WiFi country so the hotspot can start:
 WIFI_COUNTRY=DE sudo -E ./install.sh
 ```
 
-`install.sh` installs the apt dependencies, configures GPIO (`lgpio` backend), boot-time USB audio auto-detection, the NetworkManager hotspot fallback, and the systemd services. It is safe to re-run.
+`install.sh` installs the apt dependencies, configures GPIO (`lgpio` backend),
+sets the early boot LED state in the Raspberry Pi firmware `config.txt`,
+configures boot-time USB audio auto-detection, the NetworkManager hotspot
+fallback, and the systemd services. It is safe to re-run.
 
 ## Iterating on code on the device
 
